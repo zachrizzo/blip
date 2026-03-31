@@ -29,12 +29,14 @@ export function AgentChatView({ agentId, agentName, companyId, initialThreadId }
   const [chatSidebarCollapsed, setChatSidebarCollapsed] = useState(false);
   const queryClient = useQueryClient();
 
-  // Fetch threads
-  const { data: threads } = useQuery({
+  // Fetch threads — filter out heartbeat-generated run threads ("On-demand ·", "Timer ·", etc.)
+  const HEARTBEAT_THREAD_RE = /^(On-demand|Timer|Automation) ·/;
+  const { data: allThreads } = useQuery({
     queryKey: ["agentThreads", agentId],
     queryFn: () => agentsApi.getThreads(agentId),
     refetchInterval: 5000,
   });
+  const threads = allThreads?.filter((t) => !HEARTBEAT_THREAD_RE.test(t.title ?? ""));
 
   // Auto-select initialThreadId if provided, else most recent thread
   useEffect(() => {

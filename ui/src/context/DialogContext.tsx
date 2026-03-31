@@ -38,6 +38,10 @@ interface DialogContextValue {
   onboardingOptions: OnboardingOptions;
   openOnboarding: (options?: OnboardingOptions) => void;
   closeOnboarding: () => void;
+  chatBubbleOpen: boolean;
+  chatBubbleAgentId: string | null;
+  openChatBubble: (agentId?: string | null) => void;
+  closeChatBubble: () => void;
 }
 
 const DialogContext = createContext<DialogContextValue | null>(null);
@@ -51,6 +55,8 @@ export function DialogProvider({ children }: { children: ReactNode }) {
   const [newAgentOpen, setNewAgentOpen] = useState(false);
   const [onboardingOpen, setOnboardingOpen] = useState(false);
   const [onboardingOptions, setOnboardingOptions] = useState<OnboardingOptions>({});
+  const [chatBubbleOpen, setChatBubbleOpen] = useState(false);
+  const [chatBubbleAgentId, setChatBubbleAgentId] = useState<string | null>(null);
 
   const openNewIssue = useCallback((defaults: NewIssueDefaults = {}) => {
     setNewIssueDefaults(defaults);
@@ -98,6 +104,15 @@ export function DialogProvider({ children }: { children: ReactNode }) {
     setOnboardingOptions({});
   }, []);
 
+  const openChatBubble = useCallback((agentId?: string | null) => {
+    if (agentId !== undefined) setChatBubbleAgentId(agentId);
+    setChatBubbleOpen(true);
+  }, []);
+
+  const closeChatBubble = useCallback(() => {
+    setChatBubbleOpen(false);
+  }, []);
+
   return (
     <DialogContext.Provider
       value={{
@@ -119,6 +134,10 @@ export function DialogProvider({ children }: { children: ReactNode }) {
         onboardingOptions,
         openOnboarding,
         closeOnboarding,
+        chatBubbleOpen,
+        chatBubbleAgentId,
+        openChatBubble,
+        closeChatBubble,
       }}
     >
       {children}

@@ -12,10 +12,16 @@ import { forbidden } from "../errors.js";
 import { validate } from "../middleware/validate.js";
 import {
   accessService,
+  agentMessageService,
   agentService,
   budgetService,
+  buildAgentPromptTemplate,
+  buildOnboardingAgentPromptTemplate,
+  buildOnboardingSystemPrompt,
   companyPortabilityService,
   companyService,
+  companySetupSkillService,
+  heartbeatService,
   logActivity,
 } from "../services/index.js";
 import type { StorageService } from "../storage/types.js";
@@ -28,6 +34,9 @@ export function companyRoutes(db: Db, storage?: StorageService) {
   const portability = companyPortabilityService(db, storage);
   const access = accessService(db);
   const budgets = budgetService(db);
+  const setupSkill = companySetupSkillService(db);
+  const messages = agentMessageService(db);
+  const heartbeat = heartbeatService(db);
 
   async function assertCanUpdateBranding(req: Request, companyId: string) {
     assertCompanyAccess(req, companyId);
@@ -304,6 +313,96 @@ export function companyRoutes(db: Db, storage?: StorageService) {
       details: req.body,
     });
     res.json(company);
+  });
+
+  /**
+   * Start the onboarding chat for an agent: creates the thread, injects the
+   * server-generated system prompt, and wakes the agent.
+   * Returns { threadId }.
+   */
+  router.post("/:companyId/agents/:agentId/onboarding-start", async (req, res) => {
+    const { companyId, agentId } = req.params as { companyId: string; agentId: string };
+    assertCompanyAccess(req, companyId);
+
+    const company = await svc.getById(companyId);
+    if (!company) { res.status(404).json({ error: "Company not found" }); return; }
+
+    const agent = await agents.getById(agentId);
+    if (!agent) { res.status(404).json({ error: "Agent not found" }); return; }
+
+    // Derive the API base URL from the request so the prompt works in any environment
+    const proto = req.headers["x-forwarded-proto"] ?? req.protocol;
+    const host = req.headers["x-forwarded-host"] ?? req.headers.host ?? "localhost";
+    const apiBaseUrl = `${proto}://${host}/api`;
+
+    const existingAdapterConfig = (agent.adapterConfig ?? {}) as Record<string, unknown>;
+
+    // Set an onboarding-specific prompt that tells the agent to respond conversationally
+    // and call setup tools via curl. This overrides the standard heartbeat-protocol template
+    // so the agent actually acts on chat messages instead of just reporting inbox status.
+    const onboardingPrompt = buildOnboardingAgentPromptTemplate({
+      agentName: agent.name,
+      agentRole: agent.role ?? "general",
+      companyName: company.name,
+      companyId,
+      agentId,
+      apiBaseUrl,
+    });
+    await agents.update(agentId, {
+      adapterConfig: { ...existingAdapterConfig, promptTemplate: onboardingPrompt },
+    });
+
+    // Create the onboarding thread
+    const thread = await messages.createThread({
+      companyId,
+      agentId,
+      title: "Company Setup",
+    });
+
+    // Inject server-generated system prompt
+    const systemPrompt = buildOnboardingSystemPrompt({
+      companyName: company.name,
+      agentName: agent.name,
+      agentRole: agent.role ?? "general",
+      companyId,
+      apiBaseUrl,
+    });
+
+    await messages.sendMessage({
+      companyId,
+      agentId,
+      threadId: thread.id,
+      senderType: "system",
+      body: systemPrompt,
+    });
+
+    // Record the onboarding thread on the company
+    await svc.update(companyId, { onboardingThreadId: thread.id });
+
+    // Wake the agent
+    try {
+      const actor = getActorInfo(req);
+      await heartbeat.wakeup(agentId, {
+        source: "on_demand",
+        triggerDetail: "manual",
+        reason: "onboarding",
+        payload: { threadId: thread.id },
+        requestedByActorType: "user",
+        requestedByActorId: actor.actorId ?? undefined,
+      });
+    } catch { /* non-fatal */ }
+
+    res.status(201).json({ threadId: thread.id });
+  });
+
+  /** Execute a company setup skill tool call (used during onboarding) */
+  router.post("/:companyId/onboarding-action", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    const { tool, args } = req.body as { tool: string; args: Record<string, unknown> };
+    if (!tool) { res.status(400).json({ error: "tool is required" }); return; }
+    const result = await setupSkill.executeAction(companyId, tool, args ?? {});
+    res.json(result);
   });
 
   router.post("/:companyId/archive", async (req, res) => {

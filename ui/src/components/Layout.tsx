@@ -13,6 +13,7 @@ import { NewProjectDialog } from "./NewProjectDialog";
 import { NewGoalDialog } from "./NewGoalDialog";
 import { NewAgentDialog } from "./NewAgentDialog";
 import { ToastViewport } from "./ToastViewport";
+import { GlobalChatBubble } from "./GlobalChatBubble";
 import { MobileBottomNav } from "./MobileBottomNav";
 import { WorktreeBanner } from "./WorktreeBanner";
 import { DevRestartBanner } from "./DevRestartBanner";
@@ -47,8 +48,8 @@ function readRememberedInstanceSettingsPath(): string {
 }
 
 export function Layout() {
-  const { sidebarOpen, setSidebarOpen, toggleSidebar, isMobile } = useSidebar();
-  const { openNewIssue, openOnboarding } = useDialog();
+  const { sidebarOpen, setSidebarOpen, toggleSidebar, isMobile, collapsed } = useSidebar();
+  const { openNewIssue } = useDialog();
   const { togglePanelVisible } = usePanel();
   const {
     companies,
@@ -91,9 +92,9 @@ export function Layout() {
     if (health?.deploymentMode === "authenticated") return;
     if (companies.length === 0) {
       onboardingTriggered.current = true;
-      openOnboarding();
+      navigate("/onboarding/new");
     }
-  }, [companies, companiesLoading, openOnboarding, health?.deploymentMode]);
+  }, [companies, companiesLoading, navigate, health?.deploymentMode]);
 
   useEffect(() => {
     if (!companyPrefix || companiesLoading || companies.length === 0) return;
@@ -346,24 +347,28 @@ export function Layout() {
               <div
                 className={cn(
                   "overflow-hidden transition-[width] duration-100 ease-out",
-                  sidebarOpen ? "w-60" : "w-0"
+                  sidebarOpen ? (collapsed ? "w-14" : "w-60") : "w-0"
                 )}
               >
                 {isInstanceSettingsRoute ? <InstanceSidebar /> : <Sidebar />}
               </div>
             </div>
-            <div className="border-t border-r border-border px-3 py-2">
-              <div className="flex items-center gap-1">
+            <div className={cn("border-t border-r border-border px-3 py-2 transition-all duration-200", collapsed && "px-1")}>
+              <div className={cn("flex items-center", collapsed ? "flex-col gap-1" : "gap-1")}>
                 <a
                   href="https://docs.paperclip.ing/"
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="flex items-center gap-2.5 px-3 py-2 text-[13px] font-medium transition-colors text-foreground/80 hover:bg-accent/50 hover:text-foreground flex-1 min-w-0"
+                  className={cn(
+                    "flex items-center text-[13px] font-medium transition-colors text-foreground/80 hover:bg-accent/50 hover:text-foreground",
+                    collapsed ? "justify-center h-9 w-9 rounded-lg" : "gap-2.5 px-3 py-2 flex-1 min-w-0",
+                  )}
+                  title="Documentation"
                 >
                   <BookOpen className="h-4 w-4 shrink-0" />
-                  <span className="truncate">Documentation</span>
+                  {!collapsed && <span className="truncate">Documentation</span>}
                 </a>
-                {health?.version && (
+                {health?.version && !collapsed && (
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <span className="px-2 text-xs text-muted-foreground shrink-0 cursor-default">v</span>
@@ -436,6 +441,7 @@ export function Layout() {
       <NewGoalDialog />
       <NewAgentDialog />
       <ToastViewport />
+      <GlobalChatBubble />
     </div>
   );
 }

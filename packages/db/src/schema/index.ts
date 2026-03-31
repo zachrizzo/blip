@@ -56,3 +56,6 @@ export { pluginEntities } from "./plugin_entities.js";
 export { pluginJobs, pluginJobRuns } from "./plugin_jobs.js";
 export { pluginWebhookDeliveries } from "./plugin_webhooks.js";
 export { pluginLogs } from "./plugin_logs.js";
+export { agentMessages } from "./agent_messages.js";
+export { agentChatThreads } from "./agent_chat_threads.js";
+export { agentBlocklistRules } from "./agent_blocklist_rules.js";

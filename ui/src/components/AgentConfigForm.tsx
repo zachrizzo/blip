@@ -669,7 +669,7 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
           )}
 
           {/* Prompt template (create mode only — edit mode shows this in Identity) */}
-          {isLocal && isCreate && (
+          {isLocal && isCreate && !props.hidePromptTemplate && (
             <>
               <Field label="Prompt Template" hint={help.promptTemplate}>
                 <MarkdownEditor
@@ -1553,7 +1553,7 @@ function ModelDropdown({
                     type="button"
                     key={m.id}
                     className={cn(
-                      "flex items-center w-full px-2 py-1.5 text-sm rounded hover:bg-accent/50",
+                      "flex items-center gap-2 w-full px-2 py-1.5 text-sm rounded hover:bg-accent/50",
                       m.id === value && "bg-accent",
                     )}
                     onClick={() => {
@@ -1561,8 +1561,20 @@ function ModelDropdown({
                       onOpenChange(false);
                     }}
                   >
-                    <span className="block w-full text-left truncate" title={m.id}>
+                    <span className="flex-1 text-left truncate" title={m.id}>
                       {groupByProvider ? extractModelName(m.id) : m.label}
+                    </span>
+                    <span className="shrink-0 flex items-center gap-1.5">
+                      {m.contextWindow !== undefined && (
+                        <span className="text-[10px] text-muted-foreground/70 font-medium">
+                          {m.contextWindow >= 1_000_000
+                            ? `${m.contextWindow / 1_000_000}M ctx`
+                            : `${Math.round(m.contextWindow / 1000)}K ctx`}
+                        </span>
+                      )}
+                      <span className="text-[10px] font-mono text-muted-foreground/50 truncate max-w-[120px]" title={m.id}>
+                        {m.id}
+                      </span>
                     </span>
                   </button>
                 ))}

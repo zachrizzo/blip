@@ -18,8 +18,14 @@ export const updateCompanySchema = createCompanySchema
     status: z.enum(COMPANY_STATUSES).optional(),
     spentMonthlyCents: z.number().int().nonnegative().optional(),
     requireBoardApprovalForNewAgents: z.boolean().optional(),
+    requireApprovalForStories: z.boolean().optional(),
     brandColor: brandColorSchema,
     logoAssetId: logoAssetIdSchema,
+    industry: z.string().nullable().optional(),
+    teamSize: z.number().int().positive().nullable().optional(),
+    primaryUseCase: z.string().nullable().optional(),
+    onboardingComplete: z.boolean().optional(),
+    onboardingThreadId: z.string().uuid().nullable().optional(),
   });
 
 export type UpdateCompany = z.infer<typeof updateCompanySchema>;

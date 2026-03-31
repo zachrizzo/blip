@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Link } from "@/lib/router";
-import { useQuery } from "@tanstack/react-query";
+import { Link, useNavigate } from "@/lib/router";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { dashboardApi } from "../api/dashboard";
 import { activityApi } from "../api/activity";
 import { issuesApi } from "../api/issues";
@@ -8,37 +8,99 @@ import { agentsApi } from "../api/agents";
 import { projectsApi } from "../api/projects";
 import { heartbeatsApi } from "../api/heartbeats";
 import { useCompany } from "../context/CompanyContext";
-import { useDialog } from "../context/DialogContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { queryKeys } from "../lib/queryKeys";
 import { MetricCard } from "../components/MetricCard";
 import { EmptyState } from "../components/EmptyState";
 import { StatusIcon } from "../components/StatusIcon";
-
 import { ActivityRow } from "../components/ActivityRow";
 import { Identity } from "../components/Identity";
+import { NeedsAttentionSection } from "../components/NeedsAttentionSection";
 import { timeAgo } from "../lib/timeAgo";
-import { cn, formatCents } from "../lib/utils";
-import { Bot, CircleDot, DollarSign, ShieldCheck, LayoutDashboard, PauseCircle } from "lucide-react";
+import { cn, formatDate } from "../lib/utils";
+import {
+  Bot,
+  CircleDot,
+  ShieldCheck,
+  LayoutDashboard,
+  Pause,
+  Square,
+  Play,
+} from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { ActiveAgentsPanel } from "../components/ActiveAgentsPanel";
 import { ChartCard, RunActivityChart, PriorityChart, IssueStatusChart, SuccessRateChart } from "../components/ActivityCharts";
 import { PageSkeleton } from "../components/PageSkeleton";
-import type { Agent, Issue } from "@paperclipai/shared";
+import type { Agent, ActivityEvent, Issue } from "@paperclipai/shared";
 import { PluginSlotOutlet } from "@/plugins/slots";
 
+const priorityBadgeClass: Record<string, string> = {
+  critical: "border-red-500/30 bg-red-500/10 text-red-500",
+  high: "border-orange-500/30 bg-orange-500/10 text-orange-500",
+  medium: "border-yellow-500/30 bg-yellow-500/10 text-yellow-500",
+  low: "border-muted/50 bg-muted/20 text-muted-foreground",
+};
+
+function groupByDay(items: ActivityEvent[]): { label: string; items: ActivityEvent[] }[] {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const yesterday = new Date(today);
+  yesterday.setDate(yesterday.getDate() - 1);
+
+  const map = new Map<string, ActivityEvent[]>();
+  for (const item of items) {
+    const d = new Date(item.createdAt);
+    d.setHours(0, 0, 0, 0);
+    const key = d.toISOString();
+    if (!map.has(key)) map.set(key, []);
+    map.get(key)!.push(item);
+  }
+
+  return Array.from(map.entries()).map(([key, groupItems]) => {
+    const d = new Date(key);
+    let label: string;
+    if (d.getTime() === today.getTime()) label = "Today";
+    else if (d.getTime() === yesterday.getTime()) label = "Yesterday";
+    else label = formatDate(d).replace(/, \d{4}$/, ""); // "Mar 28" (strip year)
+    return { label, items: groupItems };
+  });
+}
+
 function getRecentIssues(issues: Issue[]): Issue[] {
-  return [...issues]
-    .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+  return [...issues].sort(
+    (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
+  );
 }
 
 export function Dashboard() {
   const { selectedCompanyId, companies } = useCompany();
-  const { openOnboarding } = useDialog();
+  const navigate = useNavigate();
   const { setBreadcrumbs } = useBreadcrumbs();
+  const queryClient = useQueryClient();
   const [animatedActivityIds, setAnimatedActivityIds] = useState<Set<string>>(new Set());
   const seenActivityIdsRef = useRef<Set<string>>(new Set());
   const hydratedActivityRef = useRef(false);
   const activityAnimationTimersRef = useRef<number[]>([]);
+  const [confirmStop, setConfirmStop] = useState(false);
+
+  const invalidateAgents = () =>
+    queryClient.invalidateQueries({ queryKey: queryKeys.agents.list(selectedCompanyId!) });
+
+  const pauseAll = useMutation({
+    mutationFn: () => agentsApi.pauseAll(selectedCompanyId!),
+    onSuccess: invalidateAgents,
+  });
+
+  const resumeAll = useMutation({
+    mutationFn: () => agentsApi.resumeAll(selectedCompanyId!),
+    onSuccess: invalidateAgents,
+  });
+
+  const stopAll = useMutation({
+    mutationFn: () => agentsApi.stopAll(selectedCompanyId!),
+    onSuccess: () => { setConfirmStop(false); void invalidateAgents(); },
+  });
 
   const { data: agents } = useQuery({
     queryKey: queryKeys.agents.list(selectedCompanyId!),
@@ -81,7 +143,7 @@ export function Dashboard() {
   });
 
   const recentIssues = issues ? getRecentIssues(issues) : [];
-  const recentActivity = useMemo(() => (activity ?? []).slice(0, 10), [activity]);
+  const recentActivity = useMemo(() => (activity ?? []).slice(0, 20), [activity]);
 
   useEffect(() => {
     for (const timer of activityAnimationTimersRef.current) {
@@ -125,7 +187,9 @@ export function Dashboard() {
         for (const id of newIds) next.delete(id);
         return next;
       });
-      activityAnimationTimersRef.current = activityAnimationTimersRef.current.filter((t) => t !== timer);
+      activityAnimationTimersRef.current = activityAnimationTimersRef.current.filter(
+        (t) => t !== timer,
+      );
     }, 980);
     activityAnimationTimersRef.current.push(timer);
   }, [recentActivity]);
@@ -163,6 +227,8 @@ export function Dashboard() {
     return agents.find((a) => a.id === id)?.name ?? null;
   };
 
+  const activityGroups = useMemo(() => groupByDay(recentActivity), [recentActivity]);
+
   if (!selectedCompanyId) {
     if (companies.length === 0) {
       return (
@@ -170,7 +236,7 @@ export function Dashboard() {
           icon={LayoutDashboard}
           message="Welcome to Paperclip. Set up your first company and agent to get started."
           action="Get Started"
-          onAction={openOnboarding}
+          onAction={() => navigate("/onboarding/new")}
         />
       );
     }
@@ -184,6 +250,10 @@ export function Dashboard() {
   }
 
   const hasNoAgents = agents !== undefined && agents.length === 0;
+  const hasActiveAgents = (agents ?? []).some(
+    (a) => a.status !== "paused" && a.status !== "terminated",
+  );
+  const hasPausedAgents = (agents ?? []).some((a) => a.status === "paused");
 
   return (
     <div className="space-y-6">
@@ -193,12 +263,10 @@ export function Dashboard() {
         <div className="flex items-center justify-between gap-3 rounded-md border border-amber-300 bg-amber-50 px-4 py-3 dark:border-amber-500/25 dark:bg-amber-950/60">
           <div className="flex items-center gap-2.5">
             <Bot className="h-4 w-4 text-amber-600 dark:text-amber-400 shrink-0" />
-            <p className="text-sm text-amber-900 dark:text-amber-100">
-              You have no agents.
-            </p>
+            <p className="text-sm text-amber-900 dark:text-amber-100">You have no agents.</p>
           </div>
           <button
-            onClick={() => openOnboarding({ initialStep: 2, companyId: selectedCompanyId! })}
+            onClick={() => navigate("/onboarding/new")}
             className="text-sm font-medium text-amber-700 hover:text-amber-900 dark:text-amber-300 dark:hover:text-amber-100 underline underline-offset-2 shrink-0"
           >
             Create one here
@@ -206,83 +274,129 @@ export function Dashboard() {
         </div>
       )}
 
-      <ActiveAgentsPanel companyId={selectedCompanyId!} />
-
       {data && (
         <>
-          {data.budgets.activeIncidents > 0 ? (
-            <div className="flex items-start justify-between gap-3 rounded-xl border border-red-500/20 bg-[linear-gradient(180deg,rgba(255,80,80,0.12),rgba(255,255,255,0.02))] px-4 py-3">
-              <div className="flex items-start gap-2.5">
-                <PauseCircle className="mt-0.5 h-4 w-4 shrink-0 text-red-300" />
-                <div>
-                  <p className="text-sm font-medium text-red-50">
-                    {data.budgets.activeIncidents} active budget incident{data.budgets.activeIncidents === 1 ? "" : "s"}
-                  </p>
-                  <p className="text-xs text-red-100/70">
-                    {data.budgets.pausedAgents} agents paused · {data.budgets.pausedProjects} projects paused · {data.budgets.pendingApprovals} pending budget approvals
-                  </p>
-                </div>
-              </div>
-              <Link to="/costs" className="text-sm underline underline-offset-2 text-red-100">
-                Open budgets
-              </Link>
+          {/* Metrics + Bulk Controls */}
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="grid grid-cols-2 lg:grid-cols-3 gap-1 sm:gap-2 flex-1">
+              <MetricCard
+                icon={Bot}
+                value={
+                  data.agents.active +
+                  data.agents.running +
+                  data.agents.paused +
+                  data.agents.error
+                }
+                label="Agents Enabled"
+                to="/agents"
+                description={
+                  <span>
+                    {data.agents.running} running{", "}
+                    {data.agents.paused} paused{", "}
+                    {data.agents.error} errors
+                  </span>
+                }
+              />
+              <MetricCard
+                icon={CircleDot}
+                value={data.tasks.inProgress}
+                label="Tasks In Progress"
+                to="/issues"
+                description={
+                  <span>
+                    {data.tasks.open} open{", "}
+                    {data.tasks.blocked} blocked
+                  </span>
+                }
+              />
+              <MetricCard
+                icon={ShieldCheck}
+                value={data.pendingApprovals + data.budgets.pendingApprovals}
+                label="Pending Approvals"
+                to="/approvals"
+                description={
+                  <span>
+                    {data.budgets.pendingApprovals > 0
+                      ? `${data.budgets.pendingApprovals} budget approvals`
+                      : "Awaiting board review"}
+                  </span>
+                }
+              />
             </div>
-          ) : null}
 
-          <div className="grid grid-cols-2 xl:grid-cols-4 gap-1 sm:gap-2">
-            <MetricCard
-              icon={Bot}
-              value={data.agents.active + data.agents.running + data.agents.paused + data.agents.error}
-              label="Agents Enabled"
-              to="/agents"
-              description={
-                <span>
-                  {data.agents.running} running{", "}
-                  {data.agents.paused} paused{", "}
-                  {data.agents.error} errors
-                </span>
-              }
-            />
-            <MetricCard
-              icon={CircleDot}
-              value={data.tasks.inProgress}
-              label="Tasks In Progress"
-              to="/issues"
-              description={
-                <span>
-                  {data.tasks.open} open{", "}
-                  {data.tasks.blocked} blocked
-                </span>
-              }
-            />
-            <MetricCard
-              icon={DollarSign}
-              value={formatCents(data.costs.monthSpendCents)}
-              label="Month Spend"
-              to="/costs"
-              description={
-                <span>
-                  {data.costs.monthBudgetCents > 0
-                    ? `${data.costs.monthUtilizationPercent}% of ${formatCents(data.costs.monthBudgetCents)} budget`
-                    : "Unlimited budget"}
-                </span>
-              }
-            />
-            <MetricCard
-              icon={ShieldCheck}
-              value={data.pendingApprovals + data.budgets.pendingApprovals}
-              label="Pending Approvals"
-              to="/approvals"
-              description={
-                <span>
-                  {data.budgets.pendingApprovals > 0
-                    ? `${data.budgets.pendingApprovals} budget overrides awaiting board review`
-                    : "Awaiting board review"}
-                </span>
-              }
-            />
+            {/* Bulk agent controls */}
+            {agents && agents.length > 0 && (hasActiveAgents || hasPausedAgents) && (
+              <div className="flex gap-2 shrink-0">
+                {hasActiveAgents ? (
+                  <>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="border-yellow-500/50 text-yellow-500 hover:bg-yellow-500/10 hover:text-yellow-400"
+                      onClick={() => { setConfirmStop(false); pauseAll.mutate(); }}
+                      disabled={pauseAll.isPending || stopAll.isPending}
+                    >
+                      <Pause className="h-3.5 w-3.5 mr-1.5" />
+                      {pauseAll.isPending ? "Pausing…" : "Pause All"}
+                    </Button>
+                    {confirmStop ? (
+                      <Button
+                        size="sm"
+                        variant="destructive"
+                        onClick={() => stopAll.mutate()}
+                        disabled={stopAll.isPending}
+                        onBlur={() => setConfirmStop(false)}
+                        autoFocus
+                      >
+                        <Square className="h-3.5 w-3.5 mr-1.5 fill-current" />
+                        {stopAll.isPending ? "Stopping…" : "Confirm Stop"}
+                      </Button>
+                    ) : (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="border-destructive/50 text-destructive hover:bg-destructive/10"
+                        onClick={() => setConfirmStop(true)}
+                        disabled={pauseAll.isPending || stopAll.isPending}
+                      >
+                        <Square className="h-3.5 w-3.5 mr-1.5 fill-current" />
+                        Stop All
+                      </Button>
+                    )}
+                  </>
+                ) : (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="border-green-500/50 text-green-500 hover:bg-green-500/10 hover:text-green-400"
+                    onClick={() => { setConfirmStop(false); resumeAll.mutate(); }}
+                    disabled={resumeAll.isPending}
+                  >
+                    <Play className="h-3.5 w-3.5 mr-1.5 fill-green-500" />
+                    {resumeAll.isPending ? "Resuming…" : "Resume All"}
+                  </Button>
+                )}
+              </div>
+            )}
           </div>
 
+          {/* Agent Control Center */}
+          <ActiveAgentsPanel
+            companyId={selectedCompanyId!}
+            agents={agents}
+            allRuns={runs}
+          />
+
+          {/* Needs Attention */}
+          {agents && issues && (
+            <NeedsAttentionSection
+              agents={agents}
+              issues={issues}
+              pendingApprovals={data.pendingApprovals + data.budgets.pendingApprovals}
+            />
+          )}
+
+          {/* Charts */}
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
             <ChartCard title="Run Activity" subtitle="Last 14 days">
               <RunActivityChart runs={runs ?? []} />
@@ -306,22 +420,37 @@ export function Dashboard() {
           />
 
           <div className="grid md:grid-cols-2 gap-4">
-            {/* Recent Activity */}
+            {/* Recent Activity — grouped by day, up to 20 items */}
             {recentActivity.length > 0 && (
               <div className="min-w-0">
                 <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide mb-3">
                   Recent Activity
                 </h3>
-                <div className="border border-border divide-y divide-border overflow-hidden">
-                  {recentActivity.map((event) => (
-                    <ActivityRow
-                      key={event.id}
-                      event={event}
-                      agentMap={agentMap}
-                      entityNameMap={entityNameMap}
-                      entityTitleMap={entityTitleMap}
-                      className={animatedActivityIds.has(event.id) ? "activity-row-enter" : undefined}
-                    />
+                <div className="border border-border rounded-xl overflow-hidden">
+                  {activityGroups.map((group) => (
+                    <div key={group.label}>
+                      <div className="px-4 py-1.5 bg-muted/30 border-b border-border">
+                        <span className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                          {group.label}
+                        </span>
+                      </div>
+                      <div className="divide-y divide-border">
+                        {group.items.map((event) => (
+                          <ActivityRow
+                            key={event.id}
+                            event={event}
+                            agentMap={agentMap}
+                            entityNameMap={entityNameMap}
+                            entityTitleMap={entityTitleMap}
+                            className={
+                              animatedActivityIds.has(event.id)
+                                ? "activity-row-enter"
+                                : undefined
+                            }
+                          />
+                        ))}
+                      </div>
+                    </div>
                   ))}
                 </div>
               </div>
@@ -333,11 +462,11 @@ export function Dashboard() {
                 Recent Tasks
               </h3>
               {recentIssues.length === 0 ? (
-                <div className="border border-border p-4">
+                <div className="border border-border rounded-xl p-4">
                   <p className="text-sm text-muted-foreground">No tasks yet.</p>
                 </div>
               ) : (
-                <div className="border border-border divide-y divide-border overflow-hidden">
+                <div className="border border-border rounded-xl divide-y divide-border overflow-hidden">
                   {recentIssues.slice(0, 10).map((issue) => (
                     <Link
                       key={issue.id}
@@ -345,26 +474,39 @@ export function Dashboard() {
                       className="px-4 py-3 text-sm cursor-pointer hover:bg-accent/50 transition-colors no-underline text-inherit block"
                     >
                       <div className="flex items-start gap-2 sm:items-center sm:gap-3">
-                        {/* Status icon - left column on mobile */}
                         <span className="shrink-0 sm:hidden">
                           <StatusIcon status={issue.status} />
                         </span>
 
-                        {/* Right column on mobile: title + metadata stacked */}
                         <span className="flex min-w-0 flex-1 flex-col gap-1 sm:contents">
                           <span className="line-clamp-2 text-sm sm:order-2 sm:flex-1 sm:min-w-0 sm:line-clamp-none sm:truncate">
                             {issue.title}
                           </span>
                           <span className="flex items-center gap-2 sm:order-1 sm:shrink-0">
-                            <span className="hidden sm:inline-flex"><StatusIcon status={issue.status} /></span>
+                            <span className="hidden sm:inline-flex">
+                              <StatusIcon status={issue.status} />
+                            </span>
                             <span className="text-xs font-mono text-muted-foreground">
                               {issue.identifier ?? issue.id.slice(0, 8)}
                             </span>
+                            {issue.priority && priorityBadgeClass[issue.priority] && (
+                              <Badge
+                                variant="outline"
+                                className={cn(
+                                  "hidden sm:inline-flex text-[10px] px-1.5 py-0 h-4",
+                                  priorityBadgeClass[issue.priority] ?? priorityBadgeClass.low,
+                                )}
+                              >
+                                {issue.priority}
+                              </Badge>
+                            )}
                             {issue.assigneeAgentId && (() => {
                               const name = agentName(issue.assigneeAgentId);
-                              return name
-                                ? <span className="hidden sm:inline-flex"><Identity name={name} size="sm" /></span>
-                                : null;
+                              return name ? (
+                                <span className="hidden sm:inline-flex">
+                                  <Identity name={name} size="sm" />
+                                </span>
+                              ) : null;
                             })()}
                             <span className="text-xs text-muted-foreground sm:hidden">&middot;</span>
                             <span className="text-xs text-muted-foreground shrink-0 sm:order-last">
@@ -379,7 +521,6 @@ export function Dashboard() {
               )}
             </div>
           </div>
-
         </>
       )}
     </div>

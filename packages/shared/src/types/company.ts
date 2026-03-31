@@ -12,7 +12,13 @@ export interface Company {
   budgetMonthlyCents: number;
   spentMonthlyCents: number;
   requireBoardApprovalForNewAgents: boolean;
+  requireApprovalForStories: boolean;
   brandColor: string | null;
+  industry: string | null;
+  teamSize: number | null;
+  primaryUseCase: string | null;
+  onboardingComplete: boolean;
+  onboardingThreadId: string | null;
   logoAssetId: string | null;
   logoUrl: string | null;
   createdAt: Date;

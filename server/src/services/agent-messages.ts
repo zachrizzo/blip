@@ -34,7 +34,19 @@ export function agentMessageService(db: Db) {
       .leftJoin(heartbeatRuns, eq(heartbeatRuns.threadId, agentChatThreads.id))
       .where(eq(agentChatThreads.agentId, agentId))
       .orderBy(desc(agentChatThreads.updatedAt));
-    return rows;
+
+    // Deduplicate: a thread with N runs produces N rows via the LEFT JOIN.
+    // Keep one row per thread, preferring a row that has a run attached.
+    const map = new Map<string, ThreadWithRun>();
+    for (const row of rows) {
+      const existing = map.get(row.id);
+      if (!existing || (row.runId && !existing.runId)) {
+        map.set(row.id, row);
+      }
+    }
+    return [...map.values()].sort(
+      (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
+    );
   }
 
   async function getThread(threadId: string): Promise<AgentChatThread | null> {

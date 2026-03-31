@@ -15,6 +15,7 @@ interface SidebarNavItemProps {
   textBadgeTone?: "default" | "amber";
   alert?: boolean;
   liveCount?: number;
+  collapsed?: boolean;
 }
 
 export function SidebarNavItem({
@@ -29,8 +30,52 @@ export function SidebarNavItem({
   textBadgeTone = "default",
   alert = false,
   liveCount,
+  collapsed: collapsedProp,
 }: SidebarNavItemProps) {
   const { isMobile, setSidebarOpen } = useSidebar();
+  const collapsed = collapsedProp ?? false;
+
+  if (collapsed) {
+    return (
+      <NavLink
+        to={to}
+        end={end}
+        title={label}
+        className={({ isActive }) =>
+          cn(
+            "relative flex items-center justify-center h-9 w-9 rounded-lg transition-colors",
+            isActive
+              ? "bg-accent text-foreground"
+              : "text-foreground/60 hover:bg-accent/50 hover:text-foreground",
+            className,
+          )
+        }
+      >
+        <span className="relative">
+          <Icon className="h-4 w-4" />
+          {alert && (
+            <span className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-red-500 shadow-[0_0_0_2px_hsl(var(--background))]" />
+          )}
+          {badge != null && badge > 0 && (
+            <span className={cn(
+              "absolute -right-1.5 -top-1.5 flex h-3.5 w-3.5 items-center justify-center rounded-full text-[8px] font-bold leading-none",
+              badgeTone === "danger"
+                ? "bg-red-600/90 text-red-50"
+                : "bg-primary text-primary-foreground",
+            )}>
+              {badge > 9 ? "9+" : badge}
+            </span>
+          )}
+          {liveCount != null && liveCount > 0 && (
+            <span className="absolute -right-0.5 -top-0.5 h-2 w-2">
+              <span className="animate-pulse absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
+              <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500" />
+            </span>
+          )}
+        </span>
+      </NavLink>
+    );
+  }
 
   return (
     <NavLink
@@ -39,7 +84,7 @@ export function SidebarNavItem({
       onClick={() => { if (isMobile) setSidebarOpen(false); }}
       className={({ isActive }) =>
         cn(
-          "flex items-center gap-2.5 px-3 py-2 text-[13px] font-medium transition-colors",
+          "flex items-center gap-2.5 rounded-[10px] mx-1 px-3 py-2 text-[13px] font-medium transition-colors",
           isActive
             ? "bg-accent text-foreground"
             : "text-foreground/80 hover:bg-accent/50 hover:text-foreground",

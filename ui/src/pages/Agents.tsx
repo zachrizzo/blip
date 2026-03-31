@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from "react";
 import { Link, useNavigate, useLocation } from "@/lib/router";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { agentsApi, type OrgNode } from "../api/agents";
 import { heartbeatsApi } from "../api/heartbeats";
 import { useCompany } from "../context/CompanyContext";
@@ -17,7 +17,7 @@ import { relativeTime, cn, agentRouteRef, agentUrl } from "../lib/utils";
 import { PageTabBar } from "../components/PageTabBar";
 import { Tabs } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
-import { Bot, Plus, List, GitBranch, SlidersHorizontal } from "lucide-react";
+import { Bot, Plus, List, GitBranch, SlidersHorizontal, Pause, Square } from "lucide-react";
 import { AGENT_ROLE_LABELS, type Agent } from "@paperclipai/shared";
 
 const adapterLabels: Record<string, string> = {
@@ -70,6 +70,7 @@ export function Agents() {
   const navigate = useNavigate();
   const location = useLocation();
   const { isMobile } = useSidebar();
+  const queryClient = useQueryClient();
   const pathSegment = location.pathname.split("/").pop() ?? "all";
   const tab: FilterTab = (pathSegment === "all" || pathSegment === "active" || pathSegment === "paused" || pathSegment === "error") ? pathSegment : "all";
   const [view, setView] = useState<"list" | "org">("org");
@@ -77,6 +78,20 @@ export function Agents() {
   const effectiveView: "list" | "org" = forceListView ? "list" : view;
   const [showTerminated, setShowTerminated] = useState(false);
   const [filtersOpen, setFiltersOpen] = useState(false);
+  const [confirmStop, setConfirmStop] = useState(false);
+
+  const pauseAll = useMutation({
+    mutationFn: () => agentsApi.pauseAll(selectedCompanyId!),
+    onSuccess: () => { void queryClient.invalidateQueries({ queryKey: queryKeys.agents.list(selectedCompanyId!) }); },
+  });
+
+  const stopAll = useMutation({
+    mutationFn: () => agentsApi.stopAll(selectedCompanyId!),
+    onSuccess: () => {
+      setConfirmStop(false);
+      void queryClient.invalidateQueries({ queryKey: queryKeys.agents.list(selectedCompanyId!) });
+    },
+  });
 
   const { data: agents, isLoading, error } = useQuery({
     queryKey: queryKeys.agents.list(selectedCompanyId!),
@@ -179,6 +194,45 @@ export function Agents() {
               </div>
             )}
           </div>
+          {/* Pause All / Stop All */}
+          {agents && agents.length > 0 && (
+            <>
+              <Button
+                size="sm"
+                variant="outline"
+                className="border-yellow-500/50 text-yellow-500 hover:bg-yellow-500/10 hover:text-yellow-400"
+                onClick={() => { setConfirmStop(false); pauseAll.mutate(); }}
+                disabled={pauseAll.isPending || stopAll.isPending}
+              >
+                <Pause className="h-3.5 w-3.5 mr-1.5" />
+                {pauseAll.isPending ? "Pausing…" : "Pause All"}
+              </Button>
+              {confirmStop ? (
+                <Button
+                  size="sm"
+                  variant="destructive"
+                  onClick={() => stopAll.mutate()}
+                  disabled={stopAll.isPending}
+                  onBlur={() => setConfirmStop(false)}
+                  autoFocus
+                >
+                  <Square className="h-3.5 w-3.5 mr-1.5" />
+                  {stopAll.isPending ? "Stopping…" : "Confirm Stop All"}
+                </Button>
+              ) : (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="border-destructive/50 text-destructive hover:bg-destructive/10"
+                  onClick={() => setConfirmStop(true)}
+                  disabled={pauseAll.isPending || stopAll.isPending}
+                >
+                  <Square className="h-3.5 w-3.5 mr-1.5" />
+                  Stop All
+                </Button>
+              )}
+            </>
+          )}
           {/* View toggle */}
           {!forceListView && (
             <div className="flex items-center border border-border">

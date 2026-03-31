@@ -2672,6 +2672,23 @@ export function heartbeatService(db: Db) {
       // Store replyThreadId for use after run completes
       context._replyThreadId = replyThreadId;
 
+      // Inject full thread history so the agent has conversation memory across runs
+      if (replyThreadId) {
+        try {
+          const threadMsgSvc = agentMessageService(db);
+          const threadHistory = await threadMsgSvc.getMessagesForThread(replyThreadId, 30);
+          if (threadHistory.length > 0) {
+            context.paperclipThreadHistory = threadHistory.map((m) => ({
+              body: m.body,
+              senderType: m.senderType,
+              createdAt: m.createdAt,
+            }));
+          }
+        } catch (e) {
+          logger.warn(e, "Failed to load thread history for thread %s", replyThreadId);
+        }
+      }
+
       const adapterResult = await adapter.execute({
         runId: run.id,
         agent,

@@ -1,10 +1,11 @@
-import { UserPlus, Lightbulb, ShieldAlert, ShieldCheck } from "lucide-react";
+import { UserPlus, Lightbulb, ShieldAlert, ShieldCheck, BookOpen } from "lucide-react";
 import { formatCents } from "../lib/utils";
 
 export const typeLabel: Record<string, string> = {
   hire_agent: "Hire Agent",
   approve_ceo_strategy: "CEO Strategy",
   budget_override_required: "Budget Override",
+  story_approval: "Story Approval",
 };
 
 /** Build a contextual label for an approval, e.g. "Hire Agent: Designer" */
@@ -13,6 +14,9 @@ export function approvalLabel(type: string, payload?: Record<string, unknown> | 
   if (type === "hire_agent" && payload?.name) {
     return `${base}: ${String(payload.name)}`;
   }
+  if (type === "story_approval" && payload?.title) {
+    return `${base}: ${String(payload.title)}`;
+  }
   return base;
 }
 
@@ -20,6 +24,7 @@ export const typeIcon: Record<string, typeof UserPlus> = {
   hire_agent: UserPlus,
   approve_ceo_strategy: Lightbulb,
   budget_override_required: ShieldAlert,
+  story_approval: BookOpen,
 };
 
 export const defaultTypeIcon = ShieldCheck;
@@ -127,8 +132,26 @@ export function BudgetOverridePayload({ payload }: { payload: Record<string, unk
   );
 }
 
+export function StoryApprovalPayload({ payload }: { payload: Record<string, unknown> }) {
+  const description = payload.description ?? payload.body ?? payload.summary;
+  return (
+    <div className="mt-3 space-y-1.5 text-sm">
+      <PayloadField label="Title" value={payload.title} />
+      <PayloadField label="Priority" value={payload.priority} />
+      <PayloadField label="Agent" value={payload.requestingAgentName ?? payload.agentName} />
+      <PayloadField label="Issue" value={payload.issueIdentifier} />
+      {!!description && (
+        <div className="mt-2 rounded-md bg-muted/40 px-3 py-2 text-sm text-muted-foreground whitespace-pre-wrap font-mono text-xs max-h-48 overflow-y-auto">
+          {String(description)}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function ApprovalPayloadRenderer({ type, payload }: { type: string; payload: Record<string, unknown> }) {
   if (type === "hire_agent") return <HireAgentPayload payload={payload} />;
   if (type === "budget_override_required") return <BudgetOverridePayload payload={payload} />;
+  if (type === "story_approval") return <StoryApprovalPayload payload={payload} />;
   return <CeoStrategyPayload payload={payload} />;
 }

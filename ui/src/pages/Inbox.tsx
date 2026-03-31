@@ -784,6 +784,21 @@ export function Inbox() {
     [approvalsToRender, issuesToRender, showApprovalsCategory, showTouchedCategory, tab, failedRunsForTab, joinRequestsForTab],
   );
 
+  // On the Mine tab, split into action items (approvals, failed runs, join requests) and passive updates (issues)
+  const mineActionItems = useMemo(
+    () => tab === "mine" ? workItemsToRender.filter((item) => item.kind !== "issue") : [],
+    [tab, workItemsToRender],
+  );
+  const mineUpdateItems = useMemo(
+    () => tab === "mine" ? workItemsToRender.filter((item) => item.kind === "issue") : [],
+    [tab, workItemsToRender],
+  );
+  // displayWorkItems: action items first on Mine tab so keyboard nav goes through them first
+  const displayWorkItems = useMemo(
+    () => tab === "mine" ? [...mineActionItems, ...mineUpdateItems] : workItemsToRender,
+    [tab, mineActionItems, mineUpdateItems, workItemsToRender],
+  );
+
   const agentName = (id: string | null) => {
     if (!id) return null;
     return agentById.get(id) ?? null;
@@ -1017,8 +1032,8 @@ export function Inbox() {
 
   // Keep selection valid when the list shape changes, but do not auto-select on initial load.
   useEffect(() => {
-    setSelectedIndex((prev) => resolveInboxSelectionIndex(prev, workItemsToRender.length));
-  }, [workItemsToRender.length]);
+    setSelectedIndex((prev) => resolveInboxSelectionIndex(prev, displayWorkItems.length));
+  }, [displayWorkItems.length]);
 
   // Use refs for keyboard handler to avoid stale closures
   const kbStateRef = useRef({
@@ -1031,7 +1046,7 @@ export function Inbox() {
     readItems,
   });
   kbStateRef.current = {
-    workItems: workItemsToRender,
+    workItems: displayWorkItems,
     selectedIndex,
     canArchive: canArchiveFromTab,
     archivingIssueIds,
@@ -1184,7 +1199,7 @@ export function Inbox() {
     dashboard.costs.monthUtilizationPercent >= 80 &&
     !dismissed.has("alert:budget");
   const hasAlerts = showAggregateAgentError || showBudgetAlert;
-  const showWorkItemsSection = workItemsToRender.length > 0;
+  const showWorkItemsSection = displayWorkItems.length > 0;
   const showAlertsSection = shouldShowInboxSection({
     tab,
     hasItems: hasAlerts,
@@ -1214,6 +1229,218 @@ export function Inbox() {
   const unreadIssueIds = markAllReadIssues
     .map((issue) => issue.id);
   const canMarkAllRead = unreadIssueIds.length > 0;
+
+  // Render a list of work items starting at `startIndex` in displayWorkItems.
+  // When `addAccent` is true, action item rows get a colored left border.
+  const renderItemList = (items: InboxWorkItem[], startIndex: number, addAccent: boolean): ReactNode[] =>
+    items.flatMap((item, i) => {
+      const index = startIndex + i;
+      const wrapItem = (key: string, child: ReactNode) => (
+        <div
+          key={`sel-${key}`}
+          data-inbox-item
+          className="relative"
+          onClick={() => setSelectedIndex(index)}
+        >
+          {child}
+        </div>
+      );
+      const todayCutoff = Date.now() - 24 * 60 * 60 * 1000;
+      const showTodayDivider =
+        i > 0 &&
+        item.timestamp > 0 &&
+        item.timestamp < todayCutoff &&
+        items[i - 1].timestamp >= todayCutoff;
+      const elements: ReactNode[] = [];
+      if (showTodayDivider) {
+        elements.push(
+          <div key={`divider-${startIndex}-${i}`} className="flex items-center gap-3 px-4 my-2">
+            <div className="flex-1 border-t border-border" />
+            <span className="shrink-0 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+              Earlier
+            </span>
+          </div>,
+        );
+      }
+      const isSelected = selectedIndex === index;
+      const accentClass = addAccent
+        ? item.kind === "approval"
+          ? "border-l-[3px] border-l-amber-400 dark:border-l-amber-500"
+          : item.kind === "failed_run"
+            ? "border-l-[3px] border-l-red-400 dark:border-l-red-500"
+            : item.kind === "join_request"
+              ? "border-l-[3px] border-l-violet-400 dark:border-l-violet-500"
+              : ""
+        : "";
+
+      if (item.kind === "approval") {
+        const approvalKey = `approval:${item.approval.id}`;
+        const isArchiving = archivingNonIssueIds.has(approvalKey);
+        const row = (
+          <ApprovalInboxRow
+            key={approvalKey}
+            approval={item.approval}
+            selected={isSelected}
+            requesterName={agentName(item.approval.requestedByAgentId)}
+            onApprove={() => approveMutation.mutate(item.approval.id)}
+            onReject={() => rejectMutation.mutate(item.approval.id)}
+            isPending={approveMutation.isPending || rejectMutation.isPending}
+            unreadState={nonIssueUnreadState(approvalKey)}
+            onMarkRead={() => handleMarkNonIssueRead(approvalKey)}
+            onArchive={canArchiveFromTab ? () => handleArchiveNonIssue(approvalKey) : undefined}
+            archiveDisabled={isArchiving}
+            className={cn(
+              accentClass,
+              isArchiving
+                ? "pointer-events-none -translate-x-4 scale-[0.98] opacity-0 transition-all duration-200 ease-out"
+                : "transition-all duration-200 ease-out",
+            )}
+          />
+        );
+        elements.push(wrapItem(approvalKey, canArchiveFromTab ? (
+          <SwipeToArchive
+            key={approvalKey}
+            selected={isSelected}
+            disabled={isArchiving}
+            onArchive={() => handleArchiveNonIssue(approvalKey)}
+          >
+            {row}
+          </SwipeToArchive>
+        ) : row));
+        return elements;
+      }
+
+      if (item.kind === "failed_run") {
+        const runKey = `run:${item.run.id}`;
+        const isArchiving = archivingNonIssueIds.has(runKey);
+        const row = (
+          <FailedRunInboxRow
+            key={runKey}
+            run={item.run}
+            selected={isSelected}
+            issueById={issueById}
+            agentName={agentName(item.run.agentId)}
+            issueLinkState={issueLinkState}
+            onDismiss={() => dismiss(runKey)}
+            onRetry={() => retryRunMutation.mutate(item.run)}
+            isRetrying={retryingRunIds.has(item.run.id)}
+            unreadState={nonIssueUnreadState(runKey)}
+            onMarkRead={() => handleMarkNonIssueRead(runKey)}
+            onArchive={canArchiveFromTab ? () => handleArchiveNonIssue(runKey) : undefined}
+            archiveDisabled={isArchiving}
+            className={cn(
+              accentClass,
+              isArchiving
+                ? "pointer-events-none -translate-x-4 scale-[0.98] opacity-0 transition-all duration-200 ease-out"
+                : "transition-all duration-200 ease-out",
+            )}
+          />
+        );
+        elements.push(wrapItem(runKey, canArchiveFromTab ? (
+          <SwipeToArchive
+            key={runKey}
+            selected={isSelected}
+            disabled={isArchiving}
+            onArchive={() => handleArchiveNonIssue(runKey)}
+          >
+            {row}
+          </SwipeToArchive>
+        ) : row));
+        return elements;
+      }
+
+      if (item.kind === "join_request") {
+        const joinKey = `join:${item.joinRequest.id}`;
+        const isArchiving = archivingNonIssueIds.has(joinKey);
+        const row = (
+          <JoinRequestInboxRow
+            key={joinKey}
+            joinRequest={item.joinRequest}
+            selected={isSelected}
+            onApprove={() => approveJoinMutation.mutate(item.joinRequest)}
+            onReject={() => rejectJoinMutation.mutate(item.joinRequest)}
+            isPending={approveJoinMutation.isPending || rejectJoinMutation.isPending}
+            unreadState={nonIssueUnreadState(joinKey)}
+            onMarkRead={() => handleMarkNonIssueRead(joinKey)}
+            onArchive={canArchiveFromTab ? () => handleArchiveNonIssue(joinKey) : undefined}
+            archiveDisabled={isArchiving}
+            className={cn(
+              accentClass,
+              isArchiving
+                ? "pointer-events-none -translate-x-4 scale-[0.98] opacity-0 transition-all duration-200 ease-out"
+                : "transition-all duration-200 ease-out",
+            )}
+          />
+        );
+        elements.push(wrapItem(joinKey, canArchiveFromTab ? (
+          <SwipeToArchive
+            key={joinKey}
+            selected={isSelected}
+            disabled={isArchiving}
+            onArchive={() => handleArchiveNonIssue(joinKey)}
+          >
+            {row}
+          </SwipeToArchive>
+        ) : row));
+        return elements;
+      }
+
+      const issue = item.issue;
+      const isUnread = issue.isUnreadForMe && !fadingOutIssues.has(issue.id);
+      const isFading = fadingOutIssues.has(issue.id);
+      const isArchiving = archivingIssueIds.has(issue.id);
+      const row = (
+        <IssueRow
+          key={`issue:${issue.id}`}
+          issue={issue}
+          issueLinkState={issueLinkState}
+          selected={isSelected}
+          className={
+            isArchiving
+              ? "pointer-events-none -translate-x-4 scale-[0.98] opacity-0 transition-all duration-200 ease-out"
+              : "transition-all duration-200 ease-out"
+          }
+          desktopMetaLeading={
+            <InboxIssueMetaLeading
+              issue={issue}
+              selected={isSelected}
+              isLive={liveIssueIds.has(issue.id)}
+            />
+          }
+          mobileMeta={
+            issue.lastExternalCommentAt
+              ? `commented ${timeAgo(issue.lastExternalCommentAt)}`
+              : `updated ${timeAgo(issue.updatedAt)}`
+          }
+          unreadState={
+            isUnread ? "visible" : isFading ? "fading" : "hidden"
+          }
+          onMarkRead={() => markReadMutation.mutate(issue.id)}
+          onArchive={
+            canArchiveFromTab
+              ? () => archiveIssueMutation.mutate(issue.id)
+              : undefined
+          }
+          archiveDisabled={isArchiving || archiveIssueMutation.isPending}
+          trailingMeta={
+            issue.lastExternalCommentAt
+              ? `commented ${timeAgo(issue.lastExternalCommentAt)}`
+              : `updated ${timeAgo(issue.updatedAt)}`
+          }
+        />
+      );
+      elements.push(wrapItem(`issue:${issue.id}`, canArchiveFromTab ? (
+        <SwipeToArchive
+          key={`issue:${issue.id}`}
+          selected={isSelected}
+          disabled={isArchiving || archiveIssueMutation.isPending}
+          onArchive={() => archiveIssueMutation.mutate(issue.id)}
+        >
+          {row}
+        </SwipeToArchive>
+      ) : row));
+      return elements;
+    });
 
   return (
     <div className="space-y-6">
@@ -1313,205 +1540,47 @@ export function Inbox() {
       {showWorkItemsSection && (
         <>
           {showSeparatorBefore("work_items") && <Separator />}
-          <div>
-            <div ref={listRef} className="overflow-hidden rounded-xl border border-border bg-card">
-              {workItemsToRender.flatMap((item, index) => {
-                const wrapItem = (key: string, isSelected: boolean, child: ReactNode) => (
-                  <div
-                    key={`sel-${key}`}
-                    data-inbox-item
-                    className="relative"
-                    onClick={() => setSelectedIndex(index)}
-                  >
-                    {child}
-                  </div>
-                );
-                const todayCutoff = Date.now() - 24 * 60 * 60 * 1000;
-                const showTodayDivider =
-                  index > 0 &&
-                  item.timestamp > 0 &&
-                  item.timestamp < todayCutoff &&
-                  workItemsToRender[index - 1].timestamp >= todayCutoff;
-                const elements: ReactNode[] = [];
-                if (showTodayDivider) {
-                  elements.push(
-                    <div key="today-divider" className="flex items-center gap-3 px-4 my-2">
-                      <div className="flex-1 border-t border-border" />
-                      <span className="shrink-0 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-                        Earlier
+          <div ref={listRef} className="space-y-6">
+            {tab === "mine" ? (
+              <>
+                {mineActionItems.length > 0 && (
+                  <div>
+                    <div className="mb-2 flex items-center gap-2">
+                      <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                        Needs Action
+                      </h3>
+                      <span className="rounded-full bg-muted px-1.5 py-0.5 text-[11px] font-medium tabular-nums text-muted-foreground">
+                        {mineActionItems.length}
                       </span>
-                    </div>,
-                  );
-                }
-                const isSelected = selectedIndex === index;
-
-                if (item.kind === "approval") {
-                  const approvalKey = `approval:${item.approval.id}`;
-                  const isArchiving = archivingNonIssueIds.has(approvalKey);
-                  const row = (
-                    <ApprovalInboxRow
-                      key={approvalKey}
-                      approval={item.approval}
-                      selected={isSelected}
-                      requesterName={agentName(item.approval.requestedByAgentId)}
-                      onApprove={() => approveMutation.mutate(item.approval.id)}
-                      onReject={() => rejectMutation.mutate(item.approval.id)}
-                      isPending={approveMutation.isPending || rejectMutation.isPending}
-                      unreadState={nonIssueUnreadState(approvalKey)}
-                      onMarkRead={() => handleMarkNonIssueRead(approvalKey)}
-                      onArchive={canArchiveFromTab ? () => handleArchiveNonIssue(approvalKey) : undefined}
-                      archiveDisabled={isArchiving}
-                      className={
-                        isArchiving
-                          ? "pointer-events-none -translate-x-4 scale-[0.98] opacity-0 transition-all duration-200 ease-out"
-                          : "transition-all duration-200 ease-out"
-                      }
-                    />
-                  );
-                  elements.push(wrapItem(approvalKey, isSelected, canArchiveFromTab ? (
-                    <SwipeToArchive
-                      key={approvalKey}
-                      selected={isSelected}
-                      disabled={isArchiving}
-                      onArchive={() => handleArchiveNonIssue(approvalKey)}
-                    >
-                      {row}
-                    </SwipeToArchive>
-                  ) : row));
-                  return elements;
-                }
-
-                if (item.kind === "failed_run") {
-                  const runKey = `run:${item.run.id}`;
-                  const isArchiving = archivingNonIssueIds.has(runKey);
-                  const row = (
-                    <FailedRunInboxRow
-                      key={runKey}
-                      run={item.run}
-                      selected={isSelected}
-                      issueById={issueById}
-                      agentName={agentName(item.run.agentId)}
-                      issueLinkState={issueLinkState}
-                      onDismiss={() => dismiss(runKey)}
-                      onRetry={() => retryRunMutation.mutate(item.run)}
-                      isRetrying={retryingRunIds.has(item.run.id)}
-                      unreadState={nonIssueUnreadState(runKey)}
-                      onMarkRead={() => handleMarkNonIssueRead(runKey)}
-                      onArchive={canArchiveFromTab ? () => handleArchiveNonIssue(runKey) : undefined}
-                      archiveDisabled={isArchiving}
-                      className={
-                        isArchiving
-                          ? "pointer-events-none -translate-x-4 scale-[0.98] opacity-0 transition-all duration-200 ease-out"
-                          : "transition-all duration-200 ease-out"
-                      }
-                    />
-                  );
-                  elements.push(wrapItem(runKey, isSelected, canArchiveFromTab ? (
-                    <SwipeToArchive
-                      key={runKey}
-                      selected={isSelected}
-                      disabled={isArchiving}
-                      onArchive={() => handleArchiveNonIssue(runKey)}
-                    >
-                      {row}
-                    </SwipeToArchive>
-                  ) : row));
-                  return elements;
-                }
-
-                if (item.kind === "join_request") {
-                  const joinKey = `join:${item.joinRequest.id}`;
-                  const isArchiving = archivingNonIssueIds.has(joinKey);
-                  const row = (
-                    <JoinRequestInboxRow
-                      key={joinKey}
-                      joinRequest={item.joinRequest}
-                      selected={isSelected}
-                      onApprove={() => approveJoinMutation.mutate(item.joinRequest)}
-                      onReject={() => rejectJoinMutation.mutate(item.joinRequest)}
-                      isPending={approveJoinMutation.isPending || rejectJoinMutation.isPending}
-                      unreadState={nonIssueUnreadState(joinKey)}
-                      onMarkRead={() => handleMarkNonIssueRead(joinKey)}
-                      onArchive={canArchiveFromTab ? () => handleArchiveNonIssue(joinKey) : undefined}
-                      archiveDisabled={isArchiving}
-                      className={
-                        isArchiving
-                          ? "pointer-events-none -translate-x-4 scale-[0.98] opacity-0 transition-all duration-200 ease-out"
-                          : "transition-all duration-200 ease-out"
-                      }
-                    />
-                  );
-                  elements.push(wrapItem(joinKey, isSelected, canArchiveFromTab ? (
-                    <SwipeToArchive
-                      key={joinKey}
-                      selected={isSelected}
-                      disabled={isArchiving}
-                      onArchive={() => handleArchiveNonIssue(joinKey)}
-                    >
-                      {row}
-                    </SwipeToArchive>
-                  ) : row));
-                  return elements;
-                }
-
-                const issue = item.issue;
-                const isUnread = issue.isUnreadForMe && !fadingOutIssues.has(issue.id);
-                const isFading = fadingOutIssues.has(issue.id);
-                const isArchiving = archivingIssueIds.has(issue.id);
-                const row = (
-                  <IssueRow
-                    key={`issue:${issue.id}`}
-                    issue={issue}
-                    issueLinkState={issueLinkState}
-                    selected={isSelected}
-                    className={
-                      isArchiving
-                        ? "pointer-events-none -translate-x-4 scale-[0.98] opacity-0 transition-all duration-200 ease-out"
-                        : "transition-all duration-200 ease-out"
-                    }
-                    desktopMetaLeading={
-                      <InboxIssueMetaLeading
-                        issue={issue}
-                        selected={isSelected}
-                        isLive={liveIssueIds.has(issue.id)}
-                      />
-                    }
-                    mobileMeta={
-                      issue.lastExternalCommentAt
-                        ? `commented ${timeAgo(issue.lastExternalCommentAt)}`
-                        : `updated ${timeAgo(issue.updatedAt)}`
-                    }
-                    unreadState={
-                      isUnread ? "visible" : isFading ? "fading" : "hidden"
-                    }
-                    onMarkRead={() => markReadMutation.mutate(issue.id)}
-                    onArchive={
-                      canArchiveFromTab
-                        ? () => archiveIssueMutation.mutate(issue.id)
-                        : undefined
-                    }
-                    archiveDisabled={isArchiving || archiveIssueMutation.isPending}
-                    trailingMeta={
-                      issue.lastExternalCommentAt
-                        ? `commented ${timeAgo(issue.lastExternalCommentAt)}`
-                        : `updated ${timeAgo(issue.updatedAt)}`
-                    }
-                  />
-                );
-
-                elements.push(wrapItem(`issue:${issue.id}`, isSelected, canArchiveFromTab ? (
-                  <SwipeToArchive
-                    key={`issue:${issue.id}`}
-                    selected={isSelected}
-                    disabled={isArchiving || archiveIssueMutation.isPending}
-                    onArchive={() => archiveIssueMutation.mutate(issue.id)}
-                  >
-                    {row}
-                  </SwipeToArchive>
-                ) : row));
-                return elements;
-              })}
-            </div>
+                    </div>
+                    <div className="overflow-hidden rounded-xl border border-border bg-card">
+                      {renderItemList(mineActionItems, 0, true)}
+                    </div>
+                  </div>
+                )}
+                {mineUpdateItems.length > 0 && (
+                  <div>
+                    {mineActionItems.length > 0 && (
+                      <div className="mb-2 flex items-center gap-2">
+                        <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                          Updates
+                        </h3>
+                        <span className="rounded-full bg-muted px-1.5 py-0.5 text-[11px] font-medium tabular-nums text-muted-foreground">
+                          {mineUpdateItems.length}
+                        </span>
+                      </div>
+                    )}
+                    <div className="overflow-hidden rounded-xl border border-border bg-card">
+                      {renderItemList(mineUpdateItems, mineActionItems.length, false)}
+                    </div>
+                  </div>
+                )}
+              </>
+            ) : (
+              <div className="overflow-hidden rounded-xl border border-border bg-card">
+                {renderItemList(displayWorkItems, 0, false)}
+              </div>
+            )}
           </div>
         </>
       )}

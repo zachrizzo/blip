@@ -26,6 +26,7 @@ export const AGENT_ADAPTER_TYPES = [
   "http",
   "claude_local",
   "codex_local",
+  "gemini_local",
   "opencode_local",
   "pi_local",
   "cursor",
@@ -194,7 +195,7 @@ export const PROJECT_COLORS = [
   "#3b82f6", // blue
 ] as const;
 
-export const APPROVAL_TYPES = ["hire_agent", "approve_ceo_strategy", "budget_override_required"] as const;
+export const APPROVAL_TYPES = ["hire_agent", "approve_ceo_strategy", "budget_override_required", "story_approval"] as const;
 export type ApprovalType = (typeof APPROVAL_TYPES)[number];
 
 export const APPROVAL_STATUSES = [
@@ -323,6 +324,9 @@ export const LIVE_EVENT_TYPES = [
   "heartbeat.run.event",
   "heartbeat.run.log",
   "agent.status",
+  "agent.message.sent",
+  "agent.message.delivered",
+  "approval.created",
   "activity.logged",
   "plugin.ui.updated",
   "plugin.worker.crashed",

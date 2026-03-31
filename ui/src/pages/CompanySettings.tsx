@@ -80,6 +80,16 @@ export function CompanySettings() {
     }
   });
 
+  const storyApprovalMutation = useMutation({
+    mutationFn: (requireApproval: boolean) =>
+      companiesApi.update(selectedCompanyId!, {
+        requireApprovalForStories: requireApproval
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.companies.all });
+    }
+  });
+
   const inviteMutation = useMutation({
     mutationFn: () =>
       accessApi.createOpenClawInvitePrompt(selectedCompanyId!),
@@ -184,6 +194,27 @@ export function CompanySettings() {
       companyId: string;
       nextCompanyId: string | null;
     }) => companiesApi.archive(companyId).then(() => ({ nextCompanyId })),
+    onSuccess: async ({ nextCompanyId }) => {
+      if (nextCompanyId) {
+        setSelectedCompanyId(nextCompanyId);
+      }
+      await queryClient.invalidateQueries({
+        queryKey: queryKeys.companies.all
+      });
+      await queryClient.invalidateQueries({
+        queryKey: queryKeys.companies.stats
+      });
+    }
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: ({
+      companyId,
+      nextCompanyId
+    }: {
+      companyId: string;
+      nextCompanyId: string | null;
+    }) => companiesApi.remove(companyId).then(() => ({ nextCompanyId })),
     onSuccess: async ({ nextCompanyId }) => {
       if (nextCompanyId) {
         setSelectedCompanyId(nextCompanyId);
@@ -391,6 +422,21 @@ export function CompanySettings() {
         </div>
       </div>
 
+      {/* Story Approval */}
+      <div className="space-y-4">
+        <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+          Story Approval
+        </div>
+        <div className="rounded-md border border-border px-4 py-3">
+          <ToggleField
+            label="Require approval for agent-created stories"
+            hint="When agents create stories or issues, they'll stay pending until you approve, request changes, or reject them."
+            checked={!!selectedCompany.requireApprovalForStories}
+            onChange={(v) => storyApprovalMutation.mutate(v)}
+          />
+        </div>
+      </div>
+
       {/* Invites */}
       <div className="space-y-4">
         <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
@@ -539,6 +585,52 @@ export function CompanySettings() {
                   : "Failed to archive company"}
               </span>
             )}
+          </div>
+          <div className="border-t border-destructive/20 pt-3 mt-3">
+            <p className="text-sm text-muted-foreground mb-2">
+              Permanently delete this company and all its data — agents, tasks,
+              projects, goals, budgets, activity logs, and everything else. This
+              cannot be undone.
+            </p>
+            <div className="flex items-center gap-2">
+              <Button
+                size="sm"
+                variant="destructive"
+                disabled={deleteMutation.isPending}
+                onClick={() => {
+                  if (!selectedCompanyId || !selectedCompany) return;
+                  const confirmed = window.confirm(
+                    `Permanently delete "${selectedCompany.name}" and ALL its data? This cannot be undone.`
+                  );
+                  if (!confirmed) return;
+                  const doubleConfirmed = window.confirm(
+                    `Are you absolutely sure? All agents, tasks, projects, and history will be permanently destroyed.`
+                  );
+                  if (!doubleConfirmed) return;
+                  const nextCompanyId =
+                    companies.find(
+                      (company) =>
+                        company.id !== selectedCompanyId &&
+                        company.status !== "archived"
+                    )?.id ?? null;
+                  deleteMutation.mutate({
+                    companyId: selectedCompanyId,
+                    nextCompanyId
+                  });
+                }}
+              >
+                {deleteMutation.isPending
+                  ? "Deleting..."
+                  : "Delete company permanently"}
+              </Button>
+              {deleteMutation.isError && (
+                <span className="text-xs text-destructive">
+                  {deleteMutation.error instanceof Error
+                    ? deleteMutation.error.message
+                    : "Failed to delete company"}
+                </span>
+              )}
+            </div>
           </div>
         </div>
       </div>

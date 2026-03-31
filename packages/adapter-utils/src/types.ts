@@ -127,6 +127,7 @@ export interface AdapterExecutionContext {
 export interface AdapterModel {
   id: string;
   label: string;
+  contextWindow?: number;
 }
 
 export type AdapterEnvironmentCheckLevel = "info" | "warn" | "error";

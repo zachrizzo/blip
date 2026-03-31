@@ -28,12 +28,20 @@ export const companiesApi = {
     data: Partial<
       Pick<
         Company,
-        "name" | "description" | "status" | "budgetMonthlyCents" | "requireBoardApprovalForNewAgents" | "brandColor" | "logoAssetId"
+        | "name" | "description" | "status" | "budgetMonthlyCents"
+        | "requireBoardApprovalForNewAgents" | "requireApprovalForStories"
+        | "brandColor" | "logoAssetId"
+        | "industry" | "teamSize" | "primaryUseCase"
+        | "onboardingComplete" | "onboardingThreadId"
       >
     >,
   ) => api.patch<Company>(`/companies/${companyId}`, data),
   updateBranding: (companyId: string, data: UpdateCompanyBranding) =>
     api.patch<Company>(`/companies/${companyId}/branding`, data),
+  onboardingStart: (companyId: string, agentId: string) =>
+    api.post<{ threadId: string }>(`/companies/${companyId}/agents/${agentId}/onboarding-start`, {}),
+  onboardingAction: (companyId: string, tool: string, args: Record<string, unknown> = {}) =>
+    api.post<{ ok: boolean; result: unknown }>(`/companies/${companyId}/onboarding-action`, { tool, args }),
   archive: (companyId: string) => api.post<Company>(`/companies/${companyId}/archive`, {}),
   remove: (companyId: string) => api.delete<{ ok: true }>(`/companies/${companyId}`),
   exportBundle: (
