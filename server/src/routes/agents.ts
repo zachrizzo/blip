@@ -31,14 +31,17 @@ import { validate } from "../middleware/validate.js";
 import {
   agentService,
   agentInstructionsService,
+  agentMessageService,
   accessService,
   approvalService,
+  blocklistService,
   companySkillService,
   budgetService,
   heartbeatService,
   issueApprovalService,
   issueService,
   logActivity,
+  publishLiveEvent,
   secretService,
   syncInstructionsBundleConfigFromFilePath,
   workspaceOperationService,
@@ -92,6 +95,8 @@ export function agentRoutes(db: Db) {
   const secretsSvc = secretService(db);
   const instructions = agentInstructionsService();
   const companySkills = companySkillService(db);
+  const messages = agentMessageService(db);
+  const blocklist = blocklistService(db);
   const workspaceOperations = workspaceOperationService(db);
   const instanceSettings = instanceSettingsService(db);
   const strictSecretsMode = process.env.PAPERCLIP_SECRETS_STRICT_MODE === "true";
@@ -1892,6 +1897,43 @@ export function agentRoutes(db: Db) {
     res.json(agent);
   });
 
+  router.post("/companies/:companyId/agents/pause-all", async (req, res) => {
+    assertBoard(req);
+    const { companyId } = req.params;
+    assertCompanyAccess(req, companyId);
+    const agents = await svc.list(companyId);
+    const toPause = agents.filter((a) => a.status !== "paused" && a.status !== "terminated");
+    await Promise.all(toPause.map(async (a) => {
+      await svc.pause(a.id);
+      await heartbeat.cancelActiveForAgent(a.id);
+    }));
+    res.json({ count: toPause.length });
+  });
+
+  router.post("/companies/:companyId/agents/resume-all", async (req, res) => {
+    assertBoard(req);
+    const { companyId } = req.params;
+    assertCompanyAccess(req, companyId);
+    const agents = await svc.list(companyId);
+    const toResume = agents.filter((a) => a.status === "paused");
+    await Promise.all(toResume.map((a) => svc.resume(a.id)));
+    res.json({ count: toResume.length });
+  });
+
+  router.post("/companies/:companyId/agents/stop-all", async (req, res) => {
+    assertBoard(req);
+    const { companyId } = req.params;
+    assertCompanyAccess(req, companyId);
+    const agents = await svc.list(companyId);
+    const toStop = agents.filter((a) => a.status !== "paused" && a.status !== "terminated");
+    await Promise.all(toStop.map(async (a) => {
+      await svc.pause(a.id);
+      await heartbeat.cancelActiveForAgent(a.id);
+      await heartbeat.resetRuntimeSession(a.id);
+    }));
+    res.json({ count: toStop.length });
+  });
+
   router.delete("/agents/:id", async (req, res) => {
     assertBoard(req);
     const id = req.params.id as string;
@@ -2111,6 +2153,8 @@ export function agentRoutes(db: Db) {
       agentName: agentsTable.name,
       adapterType: agentsTable.adapterType,
       issueId: sql<string | null>`${heartbeatRuns.contextSnapshot} ->> 'issueId'`.as("issueId"),
+      usageJson: heartbeatRuns.usageJson,
+      threadId: heartbeatRuns.threadId,
     };
 
     const liveRuns = await db
@@ -2333,6 +2377,352 @@ export function agentRoutes(db: Db) {
       agentName: agent.name,
       adapterType: agent.adapterType,
     });
+  });
+
+  // ─── Agent Messages (Chat / Steering) ────────────────────────────────
+
+  /** Send a message to an agent via a run — auto-wakes agent if not running */
+  router.post("/heartbeat-runs/:runId/messages", async (req, res) => {
+    const runId = req.params.runId as string;
+    const run = await heartbeat.getRun(runId);
+    if (!run) { res.status(404).json({ error: "Run not found" }); return; }
+    assertCompanyAccess(req, run.companyId);
+
+    const { body: messageBody } = req.body as { body: string };
+    if (!messageBody?.trim()) { res.status(400).json({ error: "body is required" }); return; }
+
+    const actor = getActorInfo(req);
+    const msg = await messages.sendMessage({
+      companyId: run.companyId,
+      agentId: run.agentId,
+      runId,
+      issueId: (run.contextSnapshot as Record<string, unknown>)?.issueId as string | undefined,
+      senderType: "user",
+      senderId: actor.actorId ?? undefined,
+      body: messageBody.trim(),
+    });
+
+    publishLiveEvent({
+      companyId: run.companyId,
+      type: "agent.message.sent",
+      payload: { messageId: msg.id, agentId: run.agentId, runId, body: messageBody.trim() },
+    });
+
+    // Auto-wake the agent if it's not currently running
+    let wakeupTriggered = false;
+    try {
+      const agent = await svc.getById(run.agentId);
+      if (agent) {
+        const isPausedOrIdle = agent.status === "paused" || agent.status === "idle";
+        if (isPausedOrIdle) {
+          if (agent.status === "paused") {
+            await svc.resume(run.agentId);
+          }
+          await heartbeat.wakeup(run.agentId, {
+            source: "on_demand",
+            triggerDetail: "manual",
+            reason: `User message: ${messageBody.trim().slice(0, 100)}`,
+            payload: { userMessage: messageBody.trim(), resumeFromRunId: runId },
+            requestedByActorType: "user",
+            requestedByActorId: actor.actorId ?? undefined,
+          });
+          wakeupTriggered = true;
+        }
+      }
+    } catch (e) {
+      // Non-fatal
+    }
+
+    res.json({ ...msg, wakeupTriggered });
+  });
+
+  /** Get messages for a run */
+  router.get("/heartbeat-runs/:runId/messages", async (req, res) => {
+    const runId = req.params.runId as string;
+    const run = await heartbeat.getRun(runId);
+    if (!run) { res.status(404).json({ error: "Run not found" }); return; }
+    assertCompanyAccess(req, run.companyId);
+    res.json(await messages.getMessagesForRun(runId));
+  });
+
+  /** Send a message to an agent directly — auto-wakes agent if not running */
+  router.post("/agents/:agentId/messages", async (req, res) => {
+    const agentId = req.params.agentId as string;
+    const agent = await svc.getById(agentId);
+    if (!agent) { res.status(404).json({ error: "Agent not found" }); return; }
+    assertCompanyAccess(req, agent.companyId);
+
+    const { body: messageBody, issueId } = req.body as { body: string; issueId?: string };
+    if (!messageBody?.trim()) { res.status(400).json({ error: "body is required" }); return; }
+
+    const actor = getActorInfo(req);
+    const msg = await messages.sendMessage({
+      companyId: agent.companyId,
+      agentId,
+      issueId,
+      senderType: "user",
+      senderId: actor.actorId ?? undefined,
+      body: messageBody.trim(),
+    });
+
+    publishLiveEvent({
+      companyId: agent.companyId,
+      type: "agent.message.sent",
+      payload: { messageId: msg.id, agentId, body: messageBody.trim() },
+    });
+
+    // Auto-wake the agent with session resume
+    let wakeupTriggered = false;
+    try {
+      const isPausedOrIdle = agent.status === "paused" || agent.status === "idle";
+      if (isPausedOrIdle) {
+        if (agent.status === "paused") {
+          await svc.resume(agentId);
+        }
+
+        // Find last run to resume session from
+        const recentRuns = await heartbeat.list(agent.companyId, agentId, 1);
+        const lastRun = recentRuns[0];
+
+        await heartbeat.wakeup(agentId, {
+          source: "on_demand",
+          triggerDetail: "manual",
+          reason: `User message: ${messageBody.trim().slice(0, 100)}`,
+          payload: {
+            userMessage: messageBody.trim(),
+            ...(lastRun ? { resumeFromRunId: lastRun.id } : {}),
+          },
+          requestedByActorType: "user",
+          requestedByActorId: actor.actorId ?? undefined,
+        });
+        wakeupTriggered = true;
+      }
+    } catch (e) {
+      // Non-fatal — message is saved even if wakeup fails
+    }
+
+    res.json({ ...msg, wakeupTriggered });
+  });
+
+  /** List messages for an agent */
+  router.get("/agents/:agentId/messages", async (req, res) => {
+    const agentId = req.params.agentId as string;
+    const agent = await svc.getById(agentId);
+    if (!agent) { res.status(404).json({ error: "Agent not found" }); return; }
+    assertCompanyAccess(req, agent.companyId);
+    const limit = parseInt(req.query.limit as string) || 50;
+    res.json(await messages.listForAgent(agentId, limit));
+  });
+
+  // ─── Agent Chat Threads ─────────────────────────────────────────────
+
+  /** List threads for an agent */
+  router.get("/agents/:agentId/threads", async (req, res) => {
+    const agentId = req.params.agentId as string;
+    const agent = await svc.getById(agentId);
+    if (!agent) { res.status(404).json({ error: "Agent not found" }); return; }
+    assertCompanyAccess(req, agent.companyId);
+    res.json(await messages.listThreads(agentId));
+  });
+
+  /** Create a new thread for an agent */
+  router.post("/agents/:agentId/threads", async (req, res) => {
+    const agentId = req.params.agentId as string;
+    const agent = await svc.getById(agentId);
+    if (!agent) { res.status(404).json({ error: "Agent not found" }); return; }
+    assertCompanyAccess(req, agent.companyId);
+    const { title, issueId } = req.body as { title?: string; issueId?: string };
+    const thread = await messages.createThread({
+      companyId: agent.companyId,
+      agentId,
+      issueId,
+      title: title ?? "New Chat",
+    });
+    res.status(201).json(thread);
+  });
+
+  /** Get messages for a thread */
+  router.get("/agent-threads/:threadId/messages", async (req, res) => {
+    const threadId = req.params.threadId as string;
+    const thread = await messages.getThread(threadId);
+    if (!thread) { res.status(404).json({ error: "Thread not found" }); return; }
+    assertCompanyAccess(req, thread.companyId);
+    res.json(await messages.getMessagesForThread(threadId));
+  });
+
+  /** Send a message in a thread */
+  router.post("/agent-threads/:threadId/messages", async (req, res) => {
+    const threadId = req.params.threadId as string;
+    const thread = await messages.getThread(threadId);
+    if (!thread) { res.status(404).json({ error: "Thread not found" }); return; }
+    assertCompanyAccess(req, thread.companyId);
+
+    const { body: messageBody } = req.body as { body: string };
+    if (!messageBody?.trim()) { res.status(400).json({ error: "body is required" }); return; }
+
+    const actor = getActorInfo(req);
+    const msg = await messages.sendMessage({
+      companyId: thread.companyId,
+      agentId: thread.agentId,
+      threadId,
+      issueId: thread.issueId ?? undefined,
+      senderType: "user",
+      senderId: actor.actorId ?? undefined,
+      body: messageBody.trim(),
+    });
+
+    publishLiveEvent({
+      companyId: thread.companyId,
+      type: "agent.message.sent",
+      payload: { messageId: msg.id, agentId: thread.agentId, threadId, body: messageBody.trim() },
+    });
+
+    // Auto-wake agent with session resume
+    let wakeupTriggered = false;
+    try {
+      const agent = await svc.getById(thread.agentId);
+      if (agent && (agent.status === "paused" || agent.status === "idle")) {
+        if (agent.status === "paused") await svc.resume(thread.agentId);
+
+        // Find the last completed run for this agent to resume its session
+        const recentRuns = await heartbeat.list(agent.companyId, agent.id, 1);
+        const lastRun = recentRuns[0];
+
+        await heartbeat.wakeup(thread.agentId, {
+          source: "on_demand",
+          triggerDetail: "manual",
+          reason: `User message: ${messageBody.trim().slice(0, 100)}`,
+          threadId,
+          payload: {
+            userMessage: messageBody.trim(),
+            threadId,
+            issueId: thread.issueId,
+            ...(lastRun ? { resumeFromRunId: lastRun.id } : {}),
+          },
+          requestedByActorType: "user",
+          requestedByActorId: actor.actorId ?? undefined,
+        });
+        wakeupTriggered = true;
+      }
+    } catch (e) { /* non-fatal */ }
+
+    res.json({ ...msg, wakeupTriggered });
+  });
+
+  /** Inject a system message into a thread (used for onboarding prompts) */
+  router.post("/agent-threads/:threadId/system-message", async (req, res) => {
+    const threadId = req.params.threadId as string;
+    const thread = await messages.getThread(threadId);
+    if (!thread) { res.status(404).json({ error: "Thread not found" }); return; }
+    assertCompanyAccess(req, thread.companyId);
+
+    const { body: messageBody } = req.body as { body: string };
+    if (!messageBody?.trim()) { res.status(400).json({ error: "body is required" }); return; }
+
+    const msg = await messages.sendMessage({
+      companyId: thread.companyId,
+      agentId: thread.agentId,
+      threadId,
+      senderType: "system",
+      body: messageBody.trim(),
+    });
+
+    res.status(201).json(msg);
+  });
+
+  /** Get the run associated with a thread (null if none) */
+  router.get("/agent-threads/:threadId/run", async (req, res) => {
+    const threadId = req.params.threadId as string;
+    const thread = await messages.getThread(threadId);
+    if (!thread) { res.status(404).json({ error: "Thread not found" }); return; }
+    assertCompanyAccess(req, thread.companyId);
+    const run = await heartbeat.getRunForThread(threadId);
+    res.json(run ?? null);
+  });
+
+  /** Get run events (transcript) for the run associated with a thread */
+  router.get("/agent-threads/:threadId/run-events", async (req, res) => {
+    const threadId = req.params.threadId as string;
+    const thread = await messages.getThread(threadId);
+    if (!thread) { res.status(404).json({ error: "Thread not found" }); return; }
+    assertCompanyAccess(req, thread.companyId);
+    const run = await heartbeat.getRunForThread(threadId);
+    if (!run) { res.json([]); return; }
+    const afterSeq = Number(req.query.afterSeq ?? 0);
+    const limit = Number(req.query.limit ?? 200);
+    const events = await heartbeat.listEvents(run.id, Number.isFinite(afterSeq) ? afterSeq : 0, Number.isFinite(limit) ? limit : 200);
+    res.json(events);
+  });
+
+  // ─── Agent Blocklist Rules ─────────────────────────────────────────
+
+  /** List blocklist rules for an agent (includes company-wide rules) */
+  router.get("/agents/:agentId/blocklist", async (req, res) => {
+    const agentId = req.params.agentId as string;
+    const agent = await svc.getById(agentId);
+    if (!agent) { res.status(404).json({ error: "Agent not found" }); return; }
+    assertCompanyAccess(req, agent.companyId);
+    res.json(await blocklist.listForAgent(agentId, agent.companyId));
+  });
+
+  /** Create a blocklist rule for an agent */
+  router.post("/agents/:agentId/blocklist", async (req, res) => {
+    const agentId = req.params.agentId as string;
+    const agent = await svc.getById(agentId);
+    if (!agent) { res.status(404).json({ error: "Agent not found" }); return; }
+    assertCompanyAccess(req, agent.companyId);
+    assertBoard(req);
+
+    const { ruleType, pattern, description, enforcement } = req.body as {
+      ruleType: string; pattern: string; description?: string; enforcement?: string;
+    };
+    if (!ruleType || !pattern) { res.status(400).json({ error: "ruleType and pattern are required" }); return; }
+
+    const rule = await blocklist.create({
+      companyId: agent.companyId, agentId, ruleType, pattern, description, enforcement,
+    });
+    res.status(201).json(rule);
+  });
+
+  /** List company-wide blocklist rules */
+  router.get("/companies/:companyId/blocklist", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    res.json(await blocklist.listForCompany(companyId));
+  });
+
+  /** Create a company-wide blocklist rule */
+  router.post("/companies/:companyId/blocklist", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    assertBoard(req);
+
+    const { ruleType, pattern, description, enforcement } = req.body as {
+      ruleType: string; pattern: string; description?: string; enforcement?: string;
+    };
+    if (!ruleType || !pattern) { res.status(400).json({ error: "ruleType and pattern are required" }); return; }
+
+    const rule = await blocklist.create({
+      companyId, agentId: null, ruleType, pattern, description, enforcement,
+    });
+    res.status(201).json(rule);
+  });
+
+  /** Update a blocklist rule */
+  router.put("/blocklist-rules/:id", async (req, res) => {
+    const id = req.params.id as string;
+    const { pattern, description, enforcement, isActive } = req.body as {
+      pattern?: string; description?: string; enforcement?: string; isActive?: boolean;
+    };
+    const rule = await blocklist.update(id, { pattern, description, enforcement, isActive });
+    res.json(rule);
+  });
+
+  /** Delete a blocklist rule */
+  router.delete("/blocklist-rules/:id", async (req, res) => {
+    const id = req.params.id as string;
+    await blocklist.remove(id);
+    res.status(204).end();
   });
 
   return router;

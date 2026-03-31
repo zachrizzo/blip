@@ -36,6 +36,7 @@ export const heartbeatRuns = pgTable(
     retryOfRunId: uuid("retry_of_run_id").references((): AnyPgColumn => heartbeatRuns.id, {
       onDelete: "set null",
     }),
+    threadId: uuid("thread_id").notNull(), // FK to agent_chat_threads enforced by migration
     processLossRetryCount: integer("process_loss_retry_count").notNull().default(0),
     contextSnapshot: jsonb("context_snapshot").$type<Record<string, unknown>>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

@@ -28,6 +28,8 @@ import { costService } from "./costs.js";
 import { companySkillService } from "./company-skills.js";
 import { budgetService, type BudgetEnforcementScope } from "./budgets.js";
 import { secretService } from "./secrets.js";
+import { blocklistService } from "./blocklist.js";
+import { agentMessageService } from "./agent-messages.js";
 import { resolveDefaultAgentWorkspaceDir, resolveManagedProjectWorkspaceDir } from "../home-paths.js";
 import { summarizeHeartbeatRunResultJson } from "./heartbeat-run-summary.js";
 import {
@@ -266,6 +268,7 @@ interface WakeupOptions {
   requestedByActorType?: "user" | "agent" | "system";
   requestedByActorId?: string | null;
   contextSnapshot?: Record<string, unknown>;
+  threadId?: string;
 }
 
 type UsageTotals = {
@@ -837,6 +840,45 @@ export function heartbeatService(db: Db) {
     cancelWorkForScope: cancelBudgetScopeWork,
   };
   const budgets = budgetService(db, budgetHooks);
+  const agentMsgService = agentMessageService(db);
+
+  async function getOrCreateThreadForRun(opts: {
+    companyId: string;
+    agentId: string;
+    source: string;
+    threadId?: string;
+    issueId?: string | null;
+  }): Promise<string> {
+    if (opts.threadId) return opts.threadId;
+
+    if (opts.issueId) {
+      const thread = await agentMsgService.getOrCreateThreadForIssue(
+        opts.companyId,
+        opts.agentId,
+        opts.issueId,
+      );
+      return thread.id;
+    }
+
+    const now = new Date();
+    const label = now.toLocaleString("en-US", {
+      month: "short", day: "numeric",
+      hour: "numeric", minute: "2-digit",
+      hour12: true,
+      timeZone: "UTC",
+    });
+    const sourceLabel =
+      opts.source === "timer" ? "Timer" :
+      opts.source === "automation" ? "Automation" :
+      "On-demand";
+
+    const thread = await agentMsgService.createThread({
+      companyId: opts.companyId,
+      agentId: opts.agentId,
+      title: `${sourceLabel} · ${label}`,
+    });
+    return thread.id;
+  }
 
   async function getAgent(agentId: string) {
     return db
@@ -1597,6 +1639,14 @@ export function heartbeatService(db: Db) {
         .returning()
         .then((rows) => rows[0]);
 
+      // Retry runs inherit the original run's thread
+      const retryThreadId = run.threadId ?? await getOrCreateThreadForRun({
+        companyId: run.companyId,
+        agentId: run.agentId,
+        source: "automation",
+        issueId: issueId ?? null,
+      });
+
       const retryRun = await tx
         .insert(heartbeatRuns)
         .values({
@@ -1611,6 +1661,7 @@ export function heartbeatService(db: Db) {
           retryOfRunId: run.id,
           processLossRetryCount: (run.processLossRetryCount ?? 0) + 1,
           updatedAt: now,
+          threadId: retryThreadId,
         })
         .returning()
         .then((rows) => rows[0]);
@@ -2576,6 +2627,51 @@ export function heartbeatService(db: Db) {
           "local agent jwt secret missing or invalid; running without injected PAPERCLIP_API_KEY",
         );
       }
+      // Inject blocklist rules into context
+      try {
+        const blSvc = blocklistService(db);
+        const blocklistRules = await blSvc.getActiveRules(agent.id, agent.companyId);
+        const blocklistPrompt = blSvc.formatForPrompt(blocklistRules);
+        if (blocklistPrompt) {
+          context.paperclipBlocklist = blocklistPrompt;
+        }
+      } catch (e) {
+        logger.warn(e, "Failed to load blocklist rules for agent %s", agent.id);
+      }
+
+      // Inject pending messages into context and track threadId for response
+      let replyThreadId: string | null = null;
+      try {
+        const msgSvc = agentMessageService(db);
+        const pendingMsgs = await msgSvc.getPendingMessages(agent.id);
+        if (pendingMsgs.length > 0) {
+          context.paperclipPendingMessages = pendingMsgs.map((m) => ({
+            id: m.id,
+            body: m.body,
+            senderType: m.senderType,
+            createdAt: m.createdAt,
+          }));
+          // Track the most recent thread for replying
+          for (const m of pendingMsgs) {
+            if (m.threadId) replyThreadId = m.threadId;
+          }
+          // Also check wakeup payload for threadId
+          const payloadThreadId = context.threadId as string | undefined;
+          if (payloadThreadId) replyThreadId = payloadThreadId;
+
+          await msgSvc.markDelivered(pendingMsgs.map((m) => m.id), run.id);
+          publishLiveEvent({
+            companyId: agent.companyId,
+            type: "agent.message.delivered",
+            payload: { runId: run.id, agentId: agent.id, messageIds: pendingMsgs.map((m) => m.id) },
+          });
+        }
+      } catch (e) {
+        logger.warn(e, "Failed to load pending messages for agent %s", agent.id);
+      }
+      // Store replyThreadId for use after run completes
+      context._replyThreadId = replyThreadId;
+
       const adapterResult = await adapter.execute({
         runId: run.id,
         agent,
@@ -2779,6 +2875,47 @@ export function heartbeatService(db: Db) {
         }
       }
       await finalizeAgentStatus(agent.id, outcome);
+
+      // Save agent's response as a chat message for threaded conversations
+      try {
+        const agentMsgSvc = agentMessageService(db);
+        const responseSummary =
+          adapterResult.summary
+          ?? (adapterResult.resultJson as Record<string, unknown> | null)?.summary as string | undefined
+          ?? stdoutExcerpt?.slice(0, 1000);
+        let threadId = (context._replyThreadId as string | null) ?? null;
+
+        // Auto-create thread for issue-based runs if no thread exists yet
+        if (!threadId && issueId) {
+          try {
+            const issueThread = await agentMsgSvc.getOrCreateThreadForIssue(
+              run.companyId, run.agentId, issueId,
+            );
+            threadId = issueThread.id;
+          } catch { /* non-fatal */ }
+        }
+
+        if (responseSummary && typeof responseSummary === "string" && responseSummary.trim()) {
+          await agentMsgSvc.sendMessage({
+            companyId: run.companyId,
+            agentId: run.agentId,
+            threadId: threadId ?? undefined,
+            runId: run.id,
+            issueId: issueId ?? undefined,
+            senderType: "agent",
+            body: responseSummary.trim(),
+          });
+          if (threadId) {
+            publishLiveEvent({
+              companyId: run.companyId,
+              type: "agent.message.sent",
+              payload: { agentId: run.agentId, runId: run.id, threadId, senderType: "agent" },
+            });
+          }
+        }
+      } catch (msgErr) {
+        logger.warn({ err: msgErr, runId }, "failed to save agent response as chat message");
+      }
     } catch (err) {
       const message = redactCurrentUserText(
         err instanceof Error ? err.message : "Unknown adapter failure",
@@ -2975,6 +3112,12 @@ export function heartbeatService(db: Db) {
           readNonEmptyString(promotedContextSnapshot.resumeSessionDisplayId) ??
           await resolveSessionBeforeForWakeup(deferredAgent, promotedTaskKey);
         const now = new Date();
+        const promotedThreadId = await getOrCreateThreadForRun({
+          companyId: deferredAgent.companyId,
+          agentId: deferredAgent.id,
+          source: promotedSource,
+          issueId: readNonEmptyString(promotedContextSnapshot.issueId) ?? null,
+        });
         const newRun = await tx
           .insert(heartbeatRuns)
           .values({
@@ -2986,6 +3129,7 @@ export function heartbeatService(db: Db) {
             wakeupRequestId: deferred.id,
             contextSnapshot: promotedContextSnapshot,
             sessionIdBefore: sessionBefore,
+            threadId: promotedThreadId,
           })
           .returning()
           .then((rows) => rows[0]);
@@ -3364,6 +3508,14 @@ export function heartbeatService(db: Db) {
           .returning()
           .then((rows) => rows[0]);
 
+        const issueThreadId = await getOrCreateThreadForRun({
+          companyId: agent.companyId,
+          agentId,
+          source,
+          threadId: opts.threadId,
+          issueId: issueId ?? null,
+        });
+
         const newRun = await tx
           .insert(heartbeatRuns)
           .values({
@@ -3375,6 +3527,7 @@ export function heartbeatService(db: Db) {
             wakeupRequestId: wakeupRequest.id,
             contextSnapshot: enrichedContextSnapshot,
             sessionIdBefore: sessionBefore,
+            threadId: issueThreadId,
           })
           .returning()
           .then((rows) => rows[0]);
@@ -3489,6 +3642,14 @@ export function heartbeatService(db: Db) {
       .returning()
       .then((rows) => rows[0]);
 
+    const nonIssueThreadId = await getOrCreateThreadForRun({
+      companyId: agent.companyId,
+      agentId,
+      source,
+      threadId: opts.threadId,
+      issueId: readNonEmptyString(enrichedContextSnapshot.issueId) ?? null,
+    });
+
     const newRun = await db
       .insert(heartbeatRuns)
       .values({
@@ -3500,6 +3661,7 @@ export function heartbeatService(db: Db) {
         wakeupRequestId: wakeupRequest.id,
         contextSnapshot: enrichedContextSnapshot,
         sessionIdBefore: sessionBefore,
+        threadId: nonIssueThreadId,
       })
       .returning()
       .then((rows) => rows[0]);
@@ -3860,6 +4022,15 @@ export function heartbeatService(db: Db) {
       }),
 
     wakeup: enqueueWakeup,
+
+    getRunForThread: async (threadId: string) => {
+      const rows = await db
+        .select()
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.threadId, threadId))
+        .limit(1);
+      return rows[0] ?? null;
+    },
 
     reportRunActivity: clearDetachedRunWarning,
 

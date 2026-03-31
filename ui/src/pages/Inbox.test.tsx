@@ -104,6 +104,7 @@ describe("FailedRunInboxRow", () => {
       stdoutExcerpt: null,
       stderrExcerpt: null,
       contextSnapshot: null,
+      threadId: "thread-placeholder",
       startedAt: new Date("2026-03-11T00:00:00.000Z"),
       finishedAt: null,
       createdAt: new Date("2026-03-11T00:00:00.000Z"),

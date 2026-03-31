@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, useRef } from "react";
-import { useParams, useNavigate, Link, Navigate, useBeforeUnload } from "@/lib/router";
+import { useParams, useNavigate, useLocation, Link, Navigate, useBeforeUnload } from "@/lib/router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   agentsApi,
@@ -13,6 +13,8 @@ import { heartbeatsApi } from "../api/heartbeats";
 import { instanceSettingsApi } from "../api/instanceSettings";
 import { ApiError } from "../api/client";
 import { ChartCard, RunActivityChart, PriorityChart, IssueStatusChart, SuccessRateChart } from "../components/ActivityCharts";
+import { BlocklistEditor } from "../components/BlocklistEditor";
+import { AgentChatView } from "../components/AgentChatView";
 import { activityApi } from "../api/activity";
 import { issuesApi } from "../api/issues";
 import { usePanel } from "../context/PanelContext";
@@ -222,12 +224,14 @@ function scrollToContainerBottom(container: ScrollContainer, behavior: ScrollBeh
   container.scrollTo({ top: container.scrollHeight, behavior });
 }
 
-type AgentDetailView = "dashboard" | "instructions" | "configuration" | "skills" | "runs" | "budget";
+type AgentDetailView = "dashboard" | "chat" | "instructions" | "configuration" | "skills" | "blocklist" | "runs" | "budget";
 
 function parseAgentDetailView(value: string | null): AgentDetailView {
+  if (value === "chat") return "chat";
   if (value === "instructions" || value === "prompts") return "instructions";
   if (value === "configure" || value === "configuration") return "configuration";
   if (value === "skills") return "skills";
+  if (value === "blocklist") return "blocklist";
   if (value === "budget") return "budget";
   if (value === "runs") return value;
   return "dashboard";
@@ -528,6 +532,8 @@ export function AgentDetail() {
   const { setBreadcrumbs } = useBreadcrumbs();
   const queryClient = useQueryClient();
   const navigate = useNavigate();
+  const location = useLocation();
+  const urlThreadId = useMemo(() => new URLSearchParams(location.search).get("threadId") ?? undefined, [location.search]);
   const [actionError, setActionError] = useState<string | null>(null);
   const [moreOpen, setMoreOpen] = useState(false);
   const activeView = urlRunId ? "runs" as AgentDetailView : parseAgentDetailView(urlTab ?? null);
@@ -641,17 +647,21 @@ export function AgentDetail() {
       return;
     }
     const canonicalTab =
-      activeView === "instructions"
-        ? "instructions"
-        : activeView === "configuration"
-          ? "configuration"
-          : activeView === "skills"
-            ? "skills"
-            : activeView === "runs"
-              ? "runs"
-              : activeView === "budget"
-                ? "budget"
-              : "dashboard";
+      activeView === "chat"
+        ? "chat"
+        : activeView === "instructions"
+          ? "instructions"
+          : activeView === "configuration"
+            ? "configuration"
+            : activeView === "skills"
+              ? "skills"
+              : activeView === "blocklist"
+                ? "blocklist"
+                : activeView === "runs"
+                  ? "runs"
+                  : activeView === "budget"
+                    ? "budget"
+                  : "dashboard";
     if (routeAgentRef !== canonicalAgentRef || urlTab !== canonicalTab) {
       navigate(`/agents/${canonicalAgentRef}/${canonicalTab}`, { replace: true });
       return;
@@ -686,7 +696,12 @@ export function AgentDetail() {
         }
       }
       if (action === "invoke" && data && typeof data === "object" && "id" in data) {
-        navigate(`/agents/${canonicalAgentRef}/runs/${(data as HeartbeatRun).id}`);
+        const run = data as HeartbeatRun & { threadId?: string };
+        if (run.threadId) {
+          navigate(`/agents/${canonicalAgentRef}/chat?threadId=${run.threadId}`);
+        } else {
+          navigate(`/agents/${canonicalAgentRef}/runs/${run.id}`);
+        }
       }
     },
     onError: (err) => {
@@ -764,12 +779,16 @@ export function AgentDetail() {
       if (urlRunId) {
         crumbs.push({ label: "Runs", href: `/agents/${canonicalAgentRef}/runs` });
         crumbs.push({ label: `Run ${urlRunId.slice(0, 8)}` });
+      } else if (activeView === "chat") {
+        crumbs.push({ label: "Chat" });
       } else if (activeView === "instructions") {
         crumbs.push({ label: "Instructions" });
       } else if (activeView === "configuration") {
         crumbs.push({ label: "Configuration" });
-      // } else if (activeView === "skills") { // TODO: bring back later
-      //   crumbs.push({ label: "Skills" });
+      } else if (activeView === "skills") {
+        crumbs.push({ label: "Skills" });
+      } else if (activeView === "blocklist") {
+        crumbs.push({ label: "Blocklist" });
       } else if (activeView === "runs") {
         crumbs.push({ label: "Runs" });
       } else if (activeView === "budget") {
@@ -909,8 +928,10 @@ export function AgentDetail() {
           <PageTabBar
             items={[
               { value: "dashboard", label: "Dashboard" },
+              { value: "chat", label: "Chat" },
               { value: "instructions", label: "Instructions" },
               { value: "skills", label: "Skills" },
+              { value: "blocklist", label: "Blocklist" },
               { value: "configuration", label: "Configuration" },
               { value: "runs", label: "Runs" },
               { value: "budget", label: "Budget" },
@@ -996,6 +1017,17 @@ export function AgentDetail() {
         />
       )}
 
+      {activeView === "chat" && (
+        <div className="h-[calc(100vh-220px)] min-h-[400px]">
+          <AgentChatView
+            agentId={agent.id}
+            agentName={agent.name}
+            companyId={resolvedCompanyId ?? undefined}
+            initialThreadId={urlThreadId}
+          />
+        </div>
+      )}
+
       {activeView === "instructions" && (
         <PromptsTab
           agent={agent}
@@ -1025,6 +1057,12 @@ export function AgentDetail() {
           agent={agent}
           companyId={resolvedCompanyId ?? undefined}
         />
+      )}
+
+      {activeView === "blocklist" && resolvedCompanyId && (
+        <div className="mx-auto w-full max-w-3xl py-6">
+          <BlocklistEditor agentId={agent.id} companyId={resolvedCompanyId} />
+        </div>
       )}
 
       {activeView === "runs" && (
@@ -3293,6 +3331,7 @@ function RunDetail({ run: initialRun, agentRouteId, adapterType }: { run: Heartb
 
       {/* Log viewer */}
       <LogViewer run={run} adapterType={adapterType} />
+
       <ScrollToBottom />
     </div>
   );

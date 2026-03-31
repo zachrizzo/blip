@@ -25,6 +25,7 @@ export interface AgentKey {
 export interface AdapterModel {
   id: string;
   label: string;
+  contextWindow?: number;
 }
 
 export interface DetectedAdapterModel {
@@ -145,6 +146,12 @@ export const agentsApi = {
   pause: (id: string, companyId?: string) => api.post<Agent>(agentPath(id, companyId, "/pause"), {}),
   resume: (id: string, companyId?: string) => api.post<Agent>(agentPath(id, companyId, "/resume"), {}),
   terminate: (id: string, companyId?: string) => api.post<Agent>(agentPath(id, companyId, "/terminate"), {}),
+  pauseAll: (companyId: string) =>
+    api.post<{ count: number }>(`/companies/${encodeURIComponent(companyId)}/agents/pause-all`, {}),
+  resumeAll: (companyId: string) =>
+    api.post<{ count: number }>(`/companies/${encodeURIComponent(companyId)}/agents/resume-all`, {}),
+  stopAll: (companyId: string) =>
+    api.post<{ count: number }>(`/companies/${encodeURIComponent(companyId)}/agents/stop-all`, {}),
   remove: (id: string, companyId?: string) => api.delete<{ ok: true }>(agentPath(id, companyId)),
   listKeys: (id: string, companyId?: string) => api.get<AgentKey[]>(agentPath(id, companyId, "/keys")),
   skills: (id: string, companyId?: string) =>
@@ -178,7 +185,7 @@ export const agentsApi = {
       `/companies/${companyId}/adapters/${type}/test-environment`,
       data,
     ),
-  invoke: (id: string, companyId?: string) => api.post<HeartbeatRun>(agentPath(id, companyId, "/heartbeat/invoke"), {}),
+  invoke: (id: string, companyId?: string) => api.post<HeartbeatRun & { threadId: string }>(agentPath(id, companyId, "/heartbeat/invoke"), {}),
   wakeup: (
     id: string,
     data: {
@@ -194,10 +201,100 @@ export const agentsApi = {
     api.post<ClaudeLoginResult>(agentPath(id, companyId, "/claude-login"), {}),
   availableSkills: () =>
     api.get<{ skills: AvailableSkill[] }>("/skills/available"),
+
+  // ─── Agent Messages ─────────────────────────────────────────────────
+  sendRunMessage: (runId: string, body: string) =>
+    api.post<AgentMessage>(`/heartbeat-runs/${runId}/messages`, { body }),
+  getRunMessages: (runId: string) =>
+    api.get<AgentMessage[]>(`/heartbeat-runs/${runId}/messages`),
+  sendAgentMessage: (agentId: string, body: string, issueId?: string) =>
+    api.post<AgentMessage>(agentPath(agentId, undefined, "/messages"), { body, issueId }),
+  getAgentMessages: (agentId: string, limit = 50) =>
+    api.get<AgentMessage[]>(agentPath(agentId, undefined, `/messages?limit=${limit}`)),
+
+  // ─── Chat Threads ───────────────────────────────────────────────────
+  getThreads: (agentId: string) =>
+    api.get<ChatThread[]>(agentPath(agentId, undefined, "/threads")),
+  createThread: (agentId: string, data: { title?: string; issueId?: string }) =>
+    api.post<ChatThread>(agentPath(agentId, undefined, "/threads"), data),
+  getThreadMessages: (threadId: string) =>
+    api.get<AgentMessage[]>(`/agent-threads/${threadId}/messages`),
+  sendThreadMessage: (threadId: string, body: string) =>
+    api.post<AgentMessage>(`/agent-threads/${threadId}/messages`, { body }),
+  sendThreadSystemMessage: (threadId: string, body: string) =>
+    api.post<AgentMessage>(`/agent-threads/${threadId}/system-message`, { body }),
+  getThreadRun: (threadId: string) =>
+    api.get<HeartbeatRun | null>(`/agent-threads/${threadId}/run`),
+  getThreadRunEvents: (threadId: string, afterSeq = 0) =>
+    api.get<unknown[]>(`/agent-threads/${threadId}/run-events?afterSeq=${afterSeq}`),
+
+  // ─── Blocklist Rules ────────────────────────────────────────────────
+  getBlocklist: (agentId: string) =>
+    api.get<BlocklistRule[]>(agentPath(agentId, undefined, "/blocklist")),
+  createBlocklistRule: (agentId: string, data: CreateBlocklistRuleInput) =>
+    api.post<BlocklistRule>(agentPath(agentId, undefined, "/blocklist"), data),
+  getCompanyBlocklist: (companyId: string) =>
+    api.get<BlocklistRule[]>(`/companies/${companyId}/blocklist`),
+  createCompanyBlocklistRule: (companyId: string, data: CreateBlocklistRuleInput) =>
+    api.post<BlocklistRule>(`/companies/${companyId}/blocklist`, data),
+  updateBlocklistRule: (ruleId: string, data: Partial<BlocklistRule>) =>
+    api.put<BlocklistRule>(`/blocklist-rules/${ruleId}`, data),
+  deleteBlocklistRule: (ruleId: string) =>
+    api.delete(`/blocklist-rules/${ruleId}`),
 };
 
 export interface AvailableSkill {
   name: string;
   description: string;
   isPaperclipManaged: boolean;
+}
+
+export interface AgentMessage {
+  id: string;
+  companyId: string;
+  agentId: string;
+  runId: string | null;
+  issueId: string | null;
+  senderType: "user" | "agent" | "system";
+  senderId: string | null;
+  body: string;
+  status: "pending" | "delivered";
+  deliveredInRunId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface BlocklistRule {
+  id: string;
+  companyId: string;
+  agentId: string | null;
+  ruleType: "file" | "command" | "tool" | "custom";
+  pattern: string;
+  description: string | null;
+  enforcement: "block" | "warn";
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ChatThread {
+  id: string;
+  companyId: string;
+  agentId: string;
+  issueId: string | null;
+  title: string | null;
+  createdAt: string;
+  updatedAt: string;
+  // Run fields — null if thread has no associated run
+  runId: string | null;
+  runStatus: string | null;
+  runStartedAt: string | null;
+  runFinishedAt: string | null;
+}
+
+export interface CreateBlocklistRuleInput {
+  ruleType: string;
+  pattern: string;
+  description?: string;
+  enforcement?: string;
 }
