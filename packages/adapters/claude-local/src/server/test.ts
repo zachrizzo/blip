@@ -194,14 +194,19 @@ export async function testEnvironment(
       })();
 
       // Check Bedrock configuration when a Bedrock model ID is in use.
+      // Check all three env sources: agent config, ~/.claude/settings.json, server process.
       if (isBedrockModel(model)) {
         const hasBedrock =
           env.CLAUDE_CODE_USE_BEDROCK === "1" ||
           isNonEmpty(env.AWS_BEDROCK_BASE_URL) ||
+          claudeSettingsEnv.CLAUDE_CODE_USE_BEDROCK === "1" ||
+          isNonEmpty(claudeSettingsEnv.AWS_BEDROCK_BASE_URL) ||
           process.env.CLAUDE_CODE_USE_BEDROCK === "1";
         const hasAwsAuth =
           isNonEmpty(env.AWS_PROFILE) ||
           isNonEmpty(env.AWS_ACCESS_KEY_ID) ||
+          isNonEmpty(claudeSettingsEnv.AWS_PROFILE) ||
+          isNonEmpty(claudeSettingsEnv.AWS_ACCESS_KEY_ID) ||
           isNonEmpty(process.env.AWS_PROFILE) ||
           isNonEmpty(process.env.AWS_ACCESS_KEY_ID);
 
