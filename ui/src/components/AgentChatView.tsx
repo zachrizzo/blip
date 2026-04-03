@@ -260,6 +260,19 @@ function ThreadChat({ thread, agentId, agentName, companyId }: {
     maxChunksPerRun: 60,
   });
 
+  // Cache completed run transcripts so they don't disappear when the live
+  // run finishes. When a run transitions from active → terminal, snapshot
+  // its transcript into a ref so ChatBubble can use it immediately without
+  // waiting for RunTranscriptInline to re-fetch from the log store.
+  const cachedTranscriptRef = useRef<Map<string, TranscriptEntry[]>>(new Map());
+  useEffect(() => {
+    for (const [runId, entries] of transcriptByRun) {
+      if (entries.length > 0) {
+        cachedTranscriptRef.current.set(runId, entries);
+      }
+    }
+  }, [transcriptByRun]);
+
   const sendMutation = useMutation({
     mutationFn: (body: string) => agentsApi.sendThreadMessage(thread.id, body),
     onSuccess: () => {
@@ -324,7 +337,12 @@ function ThreadChat({ thread, agentId, agentName, companyId }: {
         ) : (
           <div className="px-4 py-4 space-y-1">
             {sorted.map((msg) => (
-              <ChatBubble key={msg.id} message={msg} agentId={agentId} />
+              <ChatBubble
+                key={msg.id}
+                message={msg}
+                agentId={agentId}
+                cachedTranscript={msg.runId ? cachedTranscriptRef.current.get(msg.runId) : undefined}
+              />
             ))}
 
             {/* Completed run transcript at the bottom — only shown when the
@@ -407,7 +425,11 @@ function ThreadChat({ thread, agentId, agentName, companyId }: {
 
 /* ── Chat bubble ─────────────────────────────────────────────────── */
 
-function ChatBubble({ message, agentId }: { message: AgentMessage; agentId?: string }) {
+function ChatBubble({ message, agentId, cachedTranscript }: {
+  message: AgentMessage;
+  agentId?: string;
+  cachedTranscript?: TranscriptEntry[];
+}) {
   const isUser = message.senderType === "user";
   const isAgent = message.senderType === "agent";
   // Transcript is expanded by default so actions/thinking are always visible
@@ -436,7 +458,11 @@ function ChatBubble({ message, agentId }: { message: AgentMessage; agentId?: str
               <span className="ml-1 text-muted-foreground/40">{showTranscript ? "— collapse" : "— expand"}</span>
             </button>
             {showTranscript && (
-              <RunTranscriptInline runId={message.runId} agentId={agentId} />
+              <RunTranscriptInline
+                runId={message.runId}
+                agentId={agentId}
+                preloadedTranscript={cachedTranscript}
+              />
             )}
           </div>
         )}
@@ -474,11 +500,16 @@ function ChatBubble({ message, agentId }: { message: AgentMessage; agentId?: str
 }
 
 /** Shows a link to the full run with transcript */
-function RunTranscriptInline({ runId, agentId }: { runId: string; agentId?: string }) {
+function RunTranscriptInline({ runId, agentId, preloadedTranscript }: {
+  runId: string;
+  agentId?: string;
+  /** Transcript already in memory from the live stream — shown instantly, no fetch needed */
+  preloadedTranscript?: TranscriptEntry[];
+}) {
   const { data: run } = useQuery({
     queryKey: ["runDetail", runId],
     queryFn: () => heartbeatsApi.get(runId),
-    staleTime: 60_000,
+    staleTime: 300_000, // 5 min — completed runs don't change
   });
 
   // Fetch the agent to get its adapterType so the correct parser is used
@@ -486,25 +517,32 @@ function RunTranscriptInline({ runId, agentId }: { runId: string; agentId?: stri
     queryKey: queryKeys.agents.detail(agentId ?? run?.agentId ?? ""),
     queryFn: () => agentsApi.get(agentId ?? run?.agentId ?? ""),
     enabled: !!(agentId || run?.agentId),
-    staleTime: 60_000,
+    staleTime: 300_000,
   });
 
-  // Use useLiveRunTranscripts to get transcript for this run
-  const runs = useMemo(() => run ? [{
-    id: run.id,
-    status: run.status,
-    invocationSource: run.invocationSource ?? "unknown",
-    triggerDetail: run.triggerDetail ?? null,
-    startedAt: run.startedAt as unknown as string | null,
-    finishedAt: run.finishedAt as unknown as string | null,
-    createdAt: run.createdAt as unknown as string,
-    agentId: run.agentId,
-    agentName: agent?.name ?? "",
-    adapterType: agent?.adapterType ?? "",
-  } satisfies LiveRunForIssue] : [], [run, agent]);
+  // Only fetch from log store if we don't have a preloaded transcript
+  const runs = useMemo(() => {
+    if (preloadedTranscript && preloadedTranscript.length > 0) return [];
+    return run ? [{
+      id: run.id,
+      status: run.status,
+      invocationSource: run.invocationSource ?? "unknown",
+      triggerDetail: run.triggerDetail ?? null,
+      startedAt: run.startedAt as unknown as string | null,
+      finishedAt: run.finishedAt as unknown as string | null,
+      createdAt: run.createdAt as unknown as string,
+      agentId: run.agentId,
+      agentName: agent?.name ?? "",
+      adapterType: agent?.adapterType ?? "",
+    } satisfies LiveRunForIssue] : [];
+  }, [run, agent, preloadedTranscript]);
 
   const { transcriptByRun } = useLiveRunTranscripts({ runs, companyId: run?.companyId, maxChunksPerRun: 400 });
-  const rawTranscript = transcriptByRun.get(runId) ?? [];
+
+  // Use preloaded transcript (from live stream) if available, otherwise use fetched
+  const rawTranscript = preloadedTranscript && preloadedTranscript.length > 0
+    ? preloadedTranscript
+    : (transcriptByRun.get(runId) ?? []);
 
   // Filter to only meaningful entries — hide raw stdout/stderr/system noise
   const transcript = useMemo(() => rawTranscript.filter((e) => {
@@ -515,7 +553,8 @@ function RunTranscriptInline({ runId, agentId }: { runId: string; agentId?: stri
     return true;
   }), [rawTranscript]);
 
-  if (!run) {
+  // Show loader only if we have nothing yet — preloaded transcript means instant display
+  if (!run && !preloadedTranscript) {
     return (
       <div className="mt-2 rounded-xl border border-border/30 bg-background/50 px-3 py-3">
         <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground/40" />
@@ -540,7 +579,7 @@ function RunTranscriptInline({ runId, agentId }: { runId: string; agentId?: stri
       )}
       <div className={cn("px-3 py-1.5 flex items-center gap-3 text-[10px]", transcript.length > 0 && "border-t border-border/20")}>
         <span className="text-muted-foreground/40">
-          {run.status === "succeeded" ? "Completed" : run.status} · {run.usageJson ? `${((run.usageJson as Record<string, unknown>).inputTokens as number ?? 0).toLocaleString()} tok` : ""}
+          {run ? (run.status === "succeeded" ? "Completed" : run.status) : "Completed"} · {run?.usageJson ? `${((run.usageJson as Record<string, unknown>).inputTokens as number ?? 0).toLocaleString()} tok` : ""}
         </span>
         {agentId && (
           <Link
