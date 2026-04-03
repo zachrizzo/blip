@@ -327,8 +327,11 @@ function ThreadChat({ thread, agentId, agentName, companyId }: {
               <ChatBubble key={msg.id} message={msg} agentId={agentId} />
             ))}
 
-            {/* Completed run transcript — shown inline when run is finished */}
-            {thread.runId && !isAgentRunning && (
+            {/* Completed run transcript at the bottom — only shown when the
+                latest run has no associated agent message yet (e.g. agent ran
+                but didn't produce a chat response). If there's already an
+                agent message with this runId, its transcript is shown above. */}
+            {thread.runId && !isAgentRunning && !sorted.some((m) => m.runId === thread.runId && m.senderType === "agent") && (
               <ThreadRunTranscript
                 runId={thread.runId}
                 agentId={agentId}
@@ -407,7 +410,8 @@ function ThreadChat({ thread, agentId, agentName, companyId }: {
 function ChatBubble({ message, agentId }: { message: AgentMessage; agentId?: string }) {
   const isUser = message.senderType === "user";
   const isAgent = message.senderType === "agent";
-  const [showTranscript, setShowTranscript] = useState(false);
+  // Transcript is expanded by default so actions/thinking are always visible
+  const [showTranscript, setShowTranscript] = useState(true);
 
   return (
     <div className={cn("flex gap-3 py-2", isUser ? "flex-row-reverse" : "")}>
@@ -417,7 +421,26 @@ function ChatBubble({ message, agentId }: { message: AgentMessage; agentId?: str
       )}>
         {isUser ? <User className="h-3.5 w-3.5" /> : <Bot className="h-3.5 w-3.5" />}
       </div>
-      <div className={cn("min-w-0", isUser ? "max-w-[75%]" : "max-w-[85%]")}>
+      <div className={cn("min-w-0 flex-1", isUser ? "max-w-[75%] flex flex-col items-end" : "max-w-[85%]")}>
+
+        {/* For agent messages: show the run work BEFORE the response bubble */}
+        {isAgent && message.runId && (
+          <div className="w-full mb-2">
+            <button
+              onClick={() => setShowTranscript(!showTranscript)}
+              className="flex items-center gap-1.5 mb-1 text-[10px] text-muted-foreground/60 hover:text-muted-foreground transition-colors"
+            >
+              <CheckCircle2 className="h-3 w-3 text-green-500/60" />
+              <span className="font-medium">Work done</span>
+              <span className="text-muted-foreground/40">· run {message.runId.slice(0, 8)}</span>
+              <span className="ml-1 text-muted-foreground/40">{showTranscript ? "— collapse" : "— expand"}</span>
+            </button>
+            {showTranscript && (
+              <RunTranscriptInline runId={message.runId} agentId={agentId} />
+            )}
+          </div>
+        )}
+
         <div className={cn(
           "rounded-2xl px-4 py-2.5 text-sm leading-relaxed",
           isUser
@@ -432,23 +455,6 @@ function ChatBubble({ message, agentId }: { message: AgentMessage; agentId?: str
             </MarkdownBody>
           )}
         </div>
-
-        {/* Expandable run transcript for agent messages */}
-        {isAgent && message.runId && (
-          <div className="mt-1.5">
-            <button
-              onClick={() => setShowTranscript(!showTranscript)}
-              className="flex items-center gap-1.5 text-[10px] text-muted-foreground/50 hover:text-muted-foreground transition-colors"
-            >
-              <CheckCircle2 className="h-3 w-3" />
-              <span>Run {message.runId.slice(0, 8)}</span>
-              <span>{showTranscript ? "— hide details" : "— show work"}</span>
-            </button>
-            {showTranscript && (
-              <RunTranscriptInline runId={message.runId} agentId={agentId} />
-            )}
-          </div>
-        )}
 
         <div className={cn(
           "flex items-center gap-2 mt-1 px-1",
