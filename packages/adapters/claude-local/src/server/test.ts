@@ -36,13 +36,38 @@ function firstNonEmptyLine(text: string): string {
   );
 }
 
+/** Returns true for Claude stream-json system/hook events that are not meaningful error text. */
+function isStreamJsonSystemEvent(line: string): boolean {
+  if (!line.startsWith("{")) return false;
+  try {
+    const parsed = JSON.parse(line) as Record<string, unknown>;
+    return parsed.type === "system" || parsed.type === "ping";
+  } catch {
+    return false;
+  }
+}
+
+function firstMeaningfulLine(text: string): string {
+  return (
+    text
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find((line) => Boolean(line) && !isStreamJsonSystemEvent(line)) ?? ""
+  );
+}
+
 function commandLooksLike(command: string, expected: string): boolean {
   const base = path.basename(command).toLowerCase();
   return base === expected || base === `${expected}.cmd` || base === `${expected}.exe`;
 }
 
+function isBedrockModel(model: string): boolean {
+  return /^(us|eu|ap|global)\.anthropic\./i.test(model);
+}
+
 function summarizeProbeDetail(stdout: string, stderr: string): string | null {
-  const raw = firstNonEmptyLine(stderr) || firstNonEmptyLine(stdout);
+  // Prefer stderr; skip stream-json system/hook events when falling back to stdout.
+  const raw = firstNonEmptyLine(stderr) || firstMeaningfulLine(stdout);
   if (!raw) return null;
   const clean = raw.replace(/\s+/g, " ").trim();
   const max = 240;
@@ -137,6 +162,36 @@ export async function testEnvironment(
         if (fromExtraArgs.length > 0) return fromExtraArgs;
         return asStringArray(config.args);
       })();
+
+      // Check Bedrock configuration when a Bedrock model ID is in use.
+      if (isBedrockModel(model)) {
+        const hasBedrock =
+          env.CLAUDE_CODE_USE_BEDROCK === "1" ||
+          isNonEmpty(env.AWS_BEDROCK_BASE_URL) ||
+          process.env.CLAUDE_CODE_USE_BEDROCK === "1";
+        const hasAwsAuth =
+          isNonEmpty(env.AWS_PROFILE) ||
+          isNonEmpty(env.AWS_ACCESS_KEY_ID) ||
+          isNonEmpty(process.env.AWS_PROFILE) ||
+          isNonEmpty(process.env.AWS_ACCESS_KEY_ID);
+
+        if (!hasBedrock) {
+          checks.push({
+            code: "claude_bedrock_env_missing",
+            level: "warn",
+            message: "Bedrock model selected but CLAUDE_CODE_USE_BEDROCK is not set.",
+            hint: "Add CLAUDE_CODE_USE_BEDROCK=1 to the agent's environment variables.",
+          });
+        }
+        if (!hasAwsAuth) {
+          checks.push({
+            code: "claude_bedrock_aws_auth_missing",
+            level: "warn",
+            message: "Bedrock model selected but no AWS credentials detected.",
+            hint: "Add AWS_PROFILE (or AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY + AWS_REGION) to the agent's environment variables.",
+          });
+        }
+      }
 
       const args = ["--print", "-", "--output-format", "stream-json", "--verbose"];
       if (dangerouslySkipPermissions) args.push("--dangerously-skip-permissions");
