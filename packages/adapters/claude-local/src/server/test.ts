@@ -14,8 +14,33 @@ import {
   ensurePathInEnv,
   runChildProcess,
 } from "@paperclipai/adapter-utils/server-utils";
+import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { detectClaudeLoginRequired, parseClaudeStreamJson } from "./parse.js";
+
+/**
+ * Read env vars from ~/.claude/settings.json (the same file Claude CLI uses).
+ * This lets all agents automatically pick up system-level settings like
+ * CLAUDE_CODE_USE_BEDROCK, AWS_PROFILE, AWS_REGION etc. without requiring
+ * per-agent configuration.
+ */
+async function readClaudeSettingsEnv(): Promise<Record<string, string>> {
+  try {
+    const configDir = process.env.CLAUDE_CONFIG_DIR?.trim() || path.join(os.homedir(), ".claude");
+    const raw = await fs.readFile(path.join(configDir, "settings.json"), "utf8");
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const envSection = parsed.env;
+    if (typeof envSection !== "object" || envSection === null || Array.isArray(envSection)) return {};
+    const result: Record<string, string> = {};
+    for (const [key, value] of Object.entries(envSection)) {
+      if (typeof value === "string") result[key] = value;
+    }
+    return result;
+  } catch {
+    return {};
+  }
+}
 
 function summarizeStatus(checks: AdapterEnvironmentCheck[]): AdapterEnvironmentTestResult["status"] {
   if (checks.some((check) => check.level === "error")) return "fail";
@@ -103,7 +128,12 @@ export async function testEnvironment(
   for (const [key, value] of Object.entries(envConfig)) {
     if (typeof value === "string") env[key] = value;
   }
-  const runtimeEnv = ensurePathInEnv({ ...process.env, ...env });
+  // Merge ~/.claude/settings.json env vars so system-wide settings like
+  // CLAUDE_CODE_USE_BEDROCK and AWS_PROFILE are automatically available
+  // without requiring per-agent configuration.
+  // Priority: agent config env > claude settings env > process env
+  const claudeSettingsEnv = await readClaudeSettingsEnv();
+  const runtimeEnv = ensurePathInEnv({ ...process.env, ...claudeSettingsEnv, ...env });
   try {
     await ensureCommandResolvable(command, cwd, runtimeEnv);
     checks.push({

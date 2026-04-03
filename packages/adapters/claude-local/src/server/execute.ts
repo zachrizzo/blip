@@ -141,6 +141,25 @@ async function buildClaudeRuntimeConfig(input: ClaudeExecutionInput): Promise<Cl
   const cwd = effectiveWorkspaceCwd || configuredCwd || process.cwd();
   await ensureAbsoluteDirectory(cwd, { createIfMissing: true });
 
+  // Read ~/.claude/settings.json env vars (e.g. CLAUDE_CODE_USE_BEDROCK, AWS_PROFILE)
+  // so agents inherit system-wide Claude configuration without per-agent setup.
+  const claudeSettingsEnv = await (async () => {
+    try {
+      const configDir = process.env.CLAUDE_CONFIG_DIR?.trim() || path.join(os.homedir(), ".claude");
+      const raw = await fs.readFile(path.join(configDir, "settings.json"), "utf8");
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      const section = parsed.env;
+      if (typeof section !== "object" || section === null || Array.isArray(section)) return {};
+      const out: Record<string, string> = {};
+      for (const [k, v] of Object.entries(section)) {
+        if (typeof v === "string") out[k] = v;
+      }
+      return out;
+    } catch {
+      return {};
+    }
+  })();
+
   const envConfig = parseObject(config.env);
   const hasExplicitApiKey =
     typeof envConfig.PAPERCLIP_API_KEY === "string" && envConfig.PAPERCLIP_API_KEY.trim().length > 0;
@@ -237,7 +256,8 @@ async function buildClaudeRuntimeConfig(input: ClaudeExecutionInput): Promise<Cl
     env.PAPERCLIP_API_KEY = authToken;
   }
 
-  const runtimeEnv = ensurePathInEnv({ ...process.env, ...env });
+  // Priority: agent config env > claude settings.json env > process env
+  const runtimeEnv = ensurePathInEnv({ ...process.env, ...claudeSettingsEnv, ...env });
   await ensureCommandResolvable(command, cwd, runtimeEnv);
   const resolvedCommand = await resolveCommandForLogs(command, cwd, runtimeEnv);
   const loggedEnv = buildInvocationEnvForLogs(env, {

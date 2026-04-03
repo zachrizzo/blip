@@ -9,19 +9,26 @@ export const models = [
   { id: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5" },
 ];
 
-/** Bedrock cross-region inference profile model IDs (us / global / eu / ap prefixes). */
+/**
+ * Bedrock cross-region inference profile model IDs.
+ * Short alias format (e.g. "us.anthropic.claude-sonnet-4-6") is used for 4.x
+ * models since Bedrock exposes them without version suffixes in the profile ID.
+ * Full version IDs are used for 3.x/4.5 models where the exact suffix is known.
+ */
 export const bedrockModels = [
-  // US cross-region inference profiles
-  { id: "us.anthropic.claude-opus-4-6-20251001-v1:0", label: "Claude Opus 4.6 (Bedrock US)" },
-  { id: "us.anthropic.claude-sonnet-4-6-20251101-v1:0", label: "Claude Sonnet 4.6 (Bedrock US)" },
+  // Claude 4.6 — US cross-region (short alias, as used by Claude Code CLI)
+  { id: "us.anthropic.claude-opus-4-6", label: "Claude Opus 4.6 (Bedrock US)" },
+  { id: "us.anthropic.claude-sonnet-4-6", label: "Claude Sonnet 4.6 (Bedrock US)" },
+  // Claude 4.5 — US cross-region (full version IDs, confirmed in use)
   { id: "us.anthropic.claude-sonnet-4-5-20250929-v1:0", label: "Claude Sonnet 4.5 (Bedrock US)" },
   { id: "us.anthropic.claude-haiku-4-5-20251001-v1:0", label: "Claude Haiku 4.5 (Bedrock US)" },
-  // Global cross-region inference profiles
-  { id: "global.anthropic.claude-opus-4-6-20251001-v1:0", label: "Claude Opus 4.6 (Bedrock Global)" },
-  { id: "global.anthropic.claude-sonnet-4-6-20251101-v1:0", label: "Claude Sonnet 4.6 (Bedrock Global)" },
+  // Claude 4.6 — Global cross-region
+  { id: "global.anthropic.claude-opus-4-6", label: "Claude Opus 4.6 (Bedrock Global)" },
+  { id: "global.anthropic.claude-sonnet-4-6", label: "Claude Sonnet 4.6 (Bedrock Global)" },
+  // Claude 4.5 — Global cross-region (full version IDs, confirmed in use)
   { id: "global.anthropic.claude-sonnet-4-5-20250929-v1:0", label: "Claude Sonnet 4.5 (Bedrock Global)" },
   { id: "global.anthropic.claude-haiku-4-5-20251001-v1:0", label: "Claude Haiku 4.5 (Bedrock Global)" },
-  // EU cross-region inference profiles
+  // EU cross-region
   { id: "eu.anthropic.claude-sonnet-4-5-20250929-v1:0", label: "Claude Sonnet 4.5 (Bedrock EU)" },
   { id: "eu.anthropic.claude-haiku-4-5-20251001-v1:0", label: "Claude Haiku 4.5 (Bedrock EU)" },
 ];
