@@ -33,16 +33,17 @@ export function agentMessageService(db: Db) {
       .from(agentChatThreads)
       .leftJoin(heartbeatRuns, eq(heartbeatRuns.threadId, agentChatThreads.id))
       .where(eq(agentChatThreads.agentId, agentId))
-      .orderBy(desc(agentChatThreads.updatedAt));
+      .orderBy(
+        desc(agentChatThreads.updatedAt),
+        desc(heartbeatRuns.createdAt),
+        desc(heartbeatRuns.startedAt),
+      );
 
     // Deduplicate: a thread with N runs produces N rows via the LEFT JOIN.
-    // Keep one row per thread, preferring a row that has a run attached.
+    // Query ordering guarantees the first row is the newest run for that thread.
     const map = new Map<string, ThreadWithRun>();
     for (const row of rows) {
-      const existing = map.get(row.id);
-      if (!existing || (row.runId && !existing.runId)) {
-        map.set(row.id, row);
-      }
+      if (!map.has(row.id)) map.set(row.id, row);
     }
     return [...map.values()].sort(
       (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
@@ -76,6 +77,7 @@ export function agentMessageService(db: Db) {
     companyId: string,
     agentId: string,
     issueId: string,
+    issueTitle?: string | null,
   ): Promise<AgentChatThread> {
     const existing = await db
       .select()
@@ -83,13 +85,10 @@ export function agentMessageService(db: Db) {
       .where(and(eq(agentChatThreads.agentId, agentId), eq(agentChatThreads.issueId, issueId)));
     if (existing[0]) return existing[0];
 
-    // Look up issue title for thread name
-    let title = issueId.slice(0, 8);
-    try {
-      const [issue] = await db.select({ identifier: issues.identifier, title: issues.title })
-        .from(issues).where(eq(issues.id, issueId));
-      if (issue) title = issue.identifier + (issue.title ? ` — ${issue.title}` : "");
-    } catch { /* use fallback */ }
+    // Use provided title or simple fallback (issue ID prefix)
+    // IMPORTANT: Do NOT query the issues table here to avoid deadlocks
+    // The title can be updated later or retrieved from the UI
+    const title = issueTitle ?? issueId.slice(0, 8);
 
     return createThread({ companyId, agentId, issueId, title });
   }
@@ -99,6 +98,7 @@ export function agentMessageService(db: Db) {
       .select()
       .from(heartbeatRuns)
       .where(eq(heartbeatRuns.threadId, threadId))
+      .orderBy(desc(heartbeatRuns.createdAt), desc(heartbeatRuns.startedAt))
       .limit(1);
     return rows[0] ?? null;
   }
