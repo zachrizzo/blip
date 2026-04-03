@@ -29,6 +29,16 @@ vi.mock("../services/index.js", () => ({
   agentService: () => ({
     getById: vi.fn(),
   }),
+  agentMessageService: () => ({
+    createThread: vi.fn().mockResolvedValue({ id: "thread-1" }),
+    getOrCreateThreadForIssue: vi.fn().mockResolvedValue({ id: "thread-1" }),
+    sendMessage: vi.fn().mockResolvedValue({ id: "msg-1", status: "pending" }),
+    markFailed: vi.fn().mockResolvedValue(undefined),
+    listThreads: vi.fn().mockResolvedValue([]),
+    getMessagesForThread: vi.fn().mockResolvedValue([]),
+  }),
+  companySetupSkillService: () => ({}),
+  heartbeatService: () => ({}),
   logActivity: vi.fn(),
 }));
 

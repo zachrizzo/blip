@@ -1061,16 +1061,10 @@ export function issueService(db: Db) {
         if (executionWorkspaceId) {
           await assertValidExecutionWorkspace(companyId, issueData.projectId, executionWorkspaceId, tx);
         }
-        const [company] = await tx
-          .update(companies)
-          .set({ issueCounter: sql`${companies.issueCounter} + 1` })
-          .where(eq(companies.id, companyId))
-          .returning({ issueCounter: companies.issueCounter, issuePrefix: companies.issuePrefix });
 
-        const issueNumber = company.issueCounter;
-        const identifier = `${company.issuePrefix}-${issueNumber}`;
-
-        const values = {
+        // Build base values before acquiring the companies row lock so all
+        // validation completes before the hot counter row is locked.
+        const baseValues = {
           ...issueData,
           originKind: issueData.originKind ?? "manual",
           goalId: resolveIssueGoalId({
@@ -1084,6 +1078,21 @@ export function issueService(db: Db) {
           ...(executionWorkspacePreference ? { executionWorkspacePreference } : {}),
           ...(executionWorkspaceSettings ? { executionWorkspaceSettings } : {}),
           companyId,
+        };
+
+        // Increment counter immediately before the INSERT to keep the
+        // companies row lock window as short as possible.
+        const [company] = await tx
+          .update(companies)
+          .set({ issueCounter: sql`${companies.issueCounter} + 1` })
+          .where(eq(companies.id, companyId))
+          .returning({ issueCounter: companies.issueCounter, issuePrefix: companies.issuePrefix });
+
+        const issueNumber = company.issueCounter;
+        const identifier = `${company.issuePrefix}-${issueNumber}`;
+
+        const values = {
+          ...baseValues,
           issueNumber,
           identifier,
         } as typeof issues.$inferInsert;
@@ -1302,8 +1311,19 @@ export function issueService(db: Db) {
         .then((rows) => rows[0] ?? null);
 
       if (updated) {
-        const [enriched] = await withIssueLabels(db, [updated]);
-        return enriched;
+        try {
+          const [enriched] = await withIssueLabels(db, [updated]);
+          return enriched;
+        } catch (labelErr) {
+          // withIssueLabels failed after the execution lock was set — clear it
+          // so the issue is not stranded in a locked state.
+          await db
+            .update(issues)
+            .set({ ...CLEAR_EXECUTION_LOCK_PATCH, status: updated.status, updatedAt: new Date() })
+            .where(eq(issues.id, id))
+            .catch(() => {});
+          throw labelErr;
+        }
       }
 
       const current = await db

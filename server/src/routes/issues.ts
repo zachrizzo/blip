@@ -294,10 +294,14 @@ export function issueRoutes(db: Db, storage: StorageService) {
       return;
     }
 
+    // Treat the string "null" from query params as undefined (no filter).
+    const assigneeAgentIdRaw = req.query.assigneeAgentId as string | undefined;
+    const participantAgentIdRaw = req.query.participantAgentId as string | undefined;
+
     const result = await svc.list(companyId, {
       status: req.query.status as string | undefined,
-      assigneeAgentId: req.query.assigneeAgentId as string | undefined,
-      participantAgentId: req.query.participantAgentId as string | undefined,
+      assigneeAgentId: assigneeAgentIdRaw === "null" ? undefined : assigneeAgentIdRaw,
+      participantAgentId: participantAgentIdRaw === "null" ? undefined : participantAgentIdRaw,
       assigneeUserId,
       touchedByUserId,
       inboxArchivedByUserId,

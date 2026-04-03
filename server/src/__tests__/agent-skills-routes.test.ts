@@ -60,6 +60,22 @@ const mockAdapter = vi.hoisted(() => ({
 vi.mock("../services/index.js", () => ({
   agentService: () => mockAgentService,
   agentInstructionsService: () => mockAgentInstructionsService,
+  agentMessageService: () => ({
+    createThread: vi.fn().mockResolvedValue({ id: "thread-1" }),
+    getOrCreateThreadForIssue: vi.fn().mockResolvedValue({ id: "thread-1" }),
+    sendMessage: vi.fn().mockResolvedValue({ id: "msg-1", status: "pending" }),
+    markFailed: vi.fn().mockResolvedValue(undefined),
+  }),
+  blocklistService: () => ({
+    create: vi.fn(),
+    listForAgent: vi.fn().mockResolvedValue([]),
+    listForCompany: vi.fn().mockResolvedValue([]),
+    update: vi.fn(),
+    remove: vi.fn(),
+    getActiveRules: vi.fn().mockResolvedValue([]),
+    formatForPrompt: vi.fn().mockReturnValue(""),
+  }),
+  companySetupSkillService: () => ({}),
   accessService: () => mockAccessService,
   approvalService: () => mockApprovalService,
   companySkillService: () => mockCompanySkillService,
@@ -79,7 +95,7 @@ vi.mock("../adapters/index.js", () => ({
 }));
 
 function createDb(requireBoardApprovalForNewAgents = false) {
-  return {
+  const db: any = {
     select: vi.fn(() => ({
       from: vi.fn(() => ({
         where: vi.fn(async () => [
@@ -90,7 +106,9 @@ function createDb(requireBoardApprovalForNewAgents = false) {
         ]),
       })),
     })),
+    transaction: vi.fn().mockImplementation(async (fn: (tx: any) => Promise<any>) => fn(db)),
   };
+  return db;
 }
 
 function createApp(db: Record<string, unknown> = createDb()) {

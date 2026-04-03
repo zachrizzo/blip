@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
-import { and, asc, desc, eq, gt, inArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, ne, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import type { BillingType, ExecutionWorkspace, ExecutionWorkspaceConfig } from "@paperclipai/shared";
 import {
@@ -870,17 +870,22 @@ export function heartbeatService(db: Db) {
   const budgets = budgetService(db, budgetHooks);
   const agentMsgService = agentMessageService(db);
 
-  async function getOrCreateThreadForRun(opts: {
-    companyId: string;
-    agentId: string;
-    source: string;
-    threadId?: string;
-    issueId?: string | null;
-  }): Promise<string> {
+  async function getOrCreateThreadForRun(
+    opts: {
+      companyId: string;
+      agentId: string;
+      source: string;
+      threadId?: string;
+      issueId?: string | null;
+    },
+    dbOverride?: Db,
+  ): Promise<string> {
     if (opts.threadId) return opts.threadId;
 
+    const svc = agentMessageService(dbOverride ?? db);
+
     if (opts.issueId) {
-      const thread = await agentMsgService.getOrCreateThreadForIssue(
+      const thread = await svc.getOrCreateThreadForIssue(
         opts.companyId,
         opts.agentId,
         opts.issueId,
@@ -900,7 +905,7 @@ export function heartbeatService(db: Db) {
       opts.source === "automation" ? "Automation" :
       "On-demand";
 
-    const thread = await agentMsgService.createThread({
+    const thread = await svc.createThread({
       companyId: opts.companyId,
       agentId: opts.agentId,
       title: `${sourceLabel} · ${label}`,
@@ -1673,7 +1678,7 @@ export function heartbeatService(db: Db) {
         agentId: run.agentId,
         source: "automation",
         issueId: issueId ?? null,
-      });
+      }, tx as unknown as Db);
 
       const retryRun = await tx
         .insert(heartbeatRuns)
@@ -1935,7 +1940,7 @@ export function heartbeatService(db: Db) {
           retriedRun = await enqueueProcessLossRetry(finalizedRun, agent, now);
         }
       } else {
-        await releaseIssueExecutionAndPromote(finalizedRun);
+        await releaseIssueExecutionAndPromote(finalizedRun, { promote: false });
       }
 
       await appendRunEvent(finalizedRun, await nextRunEventSeq(finalizedRun.id), {
@@ -1961,6 +1966,59 @@ export function heartbeatService(db: Db) {
       logger.warn({ reapedCount: reaped.length, runIds: reaped }, "reaped orphaned heartbeat runs");
     }
     return { reaped: reaped.length, runIds: reaped };
+  }
+
+  async function clearOrphanedIssueLocks() {
+    const lockedIssues = await db
+      .select({
+        id: issues.id,
+        companyId: issues.companyId,
+        executionRunId: issues.executionRunId,
+        checkoutRunId: issues.checkoutRunId,
+      })
+      .from(issues)
+      .where(sql`${issues.executionRunId} is not null`);
+
+    if (lockedIssues.length === 0) return 0;
+
+    const runIds = [...new Set(lockedIssues.flatMap((issue) => {
+      const refs: string[] = [];
+      if (issue.executionRunId) refs.push(issue.executionRunId);
+      if (issue.checkoutRunId) refs.push(issue.checkoutRunId);
+      return refs;
+    }))];
+    const activeRuns = await db
+      .select({ id: heartbeatRuns.id })
+      .from(heartbeatRuns)
+      .where(and(inArray(heartbeatRuns.id, runIds), inArray(heartbeatRuns.status, ["queued", "running"])));
+
+    const activeRunIdSet = new Set(activeRuns.map((r) => r.id));
+    const staleIssueIds = lockedIssues
+      .filter((i) => !activeRunIdSet.has(i.executionRunId!))
+      .map((i) => i.id);
+    const staleCheckoutIssueIds = lockedIssues
+      .filter((i) => !activeRunIdSet.has(i.executionRunId!) && i.checkoutRunId && !activeRunIdSet.has(i.checkoutRunId))
+      .map((i) => i.id);
+
+    if (staleIssueIds.length === 0) return 0;
+
+    await db
+      .update(issues)
+      .set({ executionRunId: null, executionAgentNameKey: null, executionLockedAt: null, updatedAt: new Date() })
+      .where(inArray(issues.id, staleIssueIds));
+
+    if (staleCheckoutIssueIds.length > 0) {
+      await db
+        .update(issues)
+        .set({ checkoutRunId: null, updatedAt: new Date() })
+        .where(inArray(issues.id, staleCheckoutIssueIds));
+    }
+
+    logger.warn(
+      { count: staleIssueIds.length, issueIds: staleIssueIds, clearedCheckoutRunIds: staleCheckoutIssueIds.length },
+      "cleared orphaned issue execution locks",
+    );
+    return staleIssueIds.length;
   }
 
   async function resumeQueuedRuns() {
@@ -2687,31 +2745,44 @@ export function heartbeatService(db: Db) {
         logger.warn(e, "Failed to load blocklist rules for agent %s", agent.id);
       }
 
-      // Inject pending messages into context and track threadId for response
+      // Inject pending messages into context and track threadId for response.
+      // Uses FOR UPDATE SKIP LOCKED inside a transaction to prevent concurrent
+      // runs from delivering the same messages more than once.
       let replyThreadId: string | null = null;
       try {
-        const msgSvc = agentMessageService(db);
-        const pendingMsgs = await msgSvc.getPendingMessages(agent.id);
-        if (pendingMsgs.length > 0) {
-          context.paperclipPendingMessages = pendingMsgs.map((m) => ({
-            id: m.id,
-            body: m.body,
-            senderType: m.senderType,
-            createdAt: m.createdAt,
-          }));
-          // Track the most recent thread for replying
-          for (const m of pendingMsgs) {
-            if (m.threadId) replyThreadId = m.threadId;
+        let deliveredMessageIds: string[] = [];
+        let pendingMsgData: Array<{ id: string; body: string; senderType: string; createdAt: Date | string }> = [];
+        let pendingThreadId: string | null = null;
+
+        await db.transaction(async (tx) => {
+          const txMsgSvc = agentMessageService(tx as unknown as Db);
+          const pendingMsgs = await txMsgSvc.getPendingMessagesForDelivery(agent.id);
+          if (pendingMsgs.length > 0) {
+            pendingMsgData = pendingMsgs.map((m) => ({
+              id: m.id,
+              body: m.body,
+              senderType: m.senderType,
+              createdAt: m.createdAt,
+            }));
+            for (const m of pendingMsgs) {
+              if (m.threadId) pendingThreadId = m.threadId;
+            }
+            deliveredMessageIds = pendingMsgs.map((m) => m.id);
+            await txMsgSvc.markDelivered(deliveredMessageIds, run.id);
           }
+        });
+
+        if (pendingMsgData.length > 0) {
+          context.paperclipPendingMessages = pendingMsgData;
+          replyThreadId = pendingThreadId;
           // Also check wakeup payload for threadId
           const payloadThreadId = context.threadId as string | undefined;
           if (payloadThreadId) replyThreadId = payloadThreadId;
 
-          await msgSvc.markDelivered(pendingMsgs.map((m) => m.id), run.id);
           publishLiveEvent({
             companyId: agent.companyId,
             type: "agent.message.delivered",
-            payload: { runId: run.id, agentId: agent.id, messageIds: pendingMsgs.map((m) => m.id) },
+            payload: { runId: run.id, agentId: agent.id, messageIds: deliveredMessageIds },
           });
         }
       } catch (e) {
@@ -2997,9 +3068,14 @@ export function heartbeatService(db: Db) {
         }
       }
 
+      // Classify the error more specifically before falling back to the generic
+      // "adapter_failed" code so the retry logic can make better decisions.
+      const classifiedCode = classifySetupError(err);
+      const errorCode: RunErrorCode = classifiedCode !== "setup_failed" ? classifiedCode : "adapter_failed";
+
       const failedRun = await setRunStatus(run.id, "failed", {
         error: message,
-        errorCode: "adapter_failed",
+        errorCode,
         finishedAt: new Date(),
         stdoutExcerpt,
         stderrExcerpt,
@@ -3082,7 +3158,11 @@ export function heartbeatService(db: Db) {
         }
   }
 
-  async function releaseIssueExecutionAndPromote(run: typeof heartbeatRuns.$inferSelect) {
+  async function releaseIssueExecutionAndPromote(
+    run: typeof heartbeatRuns.$inferSelect,
+    opts?: { promote?: boolean },
+  ) {
+    const shouldPromote = opts?.promote !== false;
     const promotedRun = await db.transaction(async (tx) => {
       await tx.execute(
         sql`select id from issues where company_id = ${run.companyId} and execution_run_id = ${run.id} for update`,
@@ -3092,6 +3172,7 @@ export function heartbeatService(db: Db) {
         .select({
           id: issues.id,
           companyId: issues.companyId,
+          checkoutRunId: issues.checkoutRunId,
         })
         .from(issues)
         .where(and(eq(issues.companyId, run.companyId), eq(issues.executionRunId, run.id)))
@@ -3099,15 +3180,22 @@ export function heartbeatService(db: Db) {
 
       if (!issue) return;
 
+      // When not promoting (permanently failing), also clear checkoutRunId
+      const clearCheckoutRunId = !shouldPromote && issue.checkoutRunId != null;
       await tx
         .update(issues)
         .set({
+          ...(clearCheckoutRunId ? { checkoutRunId: null } : {}),
           executionRunId: null,
           executionAgentNameKey: null,
           executionLockedAt: null,
           updatedAt: new Date(),
         })
         .where(eq(issues.id, issue.id));
+
+      if (!shouldPromote) {
+        return;
+      }
 
       while (true) {
         const deferred = await tx
@@ -3182,7 +3270,7 @@ export function heartbeatService(db: Db) {
           agentId: deferredAgent.id,
           source: promotedSource,
           issueId: readNonEmptyString(promotedContextSnapshot.issueId) ?? null,
-        });
+        }, tx as unknown as Db);
         const newRun = await tx
           .insert(heartbeatRuns)
           .values({
@@ -3221,6 +3309,26 @@ export function heartbeatService(db: Db) {
             updatedAt: now,
           })
           .where(eq(issues.id, issue.id));
+
+        // Coalesce any other deferred wakes for the same issue so they are not
+        // left orphaned — they will never be re-promoted since this issue slot
+        // is now owned by the run we just created.
+        await tx
+          .update(agentWakeupRequests)
+          .set({
+            status: "coalesced",
+            finishedAt: now,
+            error: "Superseded by promoted run",
+            updatedAt: now,
+          })
+          .where(
+            and(
+              eq(agentWakeupRequests.companyId, issue.companyId),
+              eq(agentWakeupRequests.status, "deferred_issue_execution"),
+              sql`${agentWakeupRequests.payload} ->> 'issueId' = ${issue.id}`,
+              ne(agentWakeupRequests.id, deferred.id),
+            ),
+          );
 
         return newRun;
       }
@@ -3579,7 +3687,7 @@ export function heartbeatService(db: Db) {
           source,
           threadId: opts.threadId,
           issueId: issueId ?? null,
-        });
+        }, tx as unknown as Db);
 
         const newRun = await tx
           .insert(heartbeatRuns)
@@ -4100,6 +4208,8 @@ export function heartbeatService(db: Db) {
     reportRunActivity: clearDetachedRunWarning,
 
     reapOrphanedRuns,
+
+    clearOrphanedIssueLocks,
 
     resumeQueuedRuns,
 

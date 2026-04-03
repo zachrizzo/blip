@@ -36,6 +36,22 @@ const mockLogActivity = vi.hoisted(() => vi.fn());
 vi.mock("../services/index.js", () => ({
   agentService: () => mockAgentService,
   agentInstructionsService: () => mockAgentInstructionsService,
+  agentMessageService: () => ({
+    createThread: vi.fn().mockResolvedValue({ id: "thread-1" }),
+    getOrCreateThreadForIssue: vi.fn().mockResolvedValue({ id: "thread-1" }),
+    sendMessage: vi.fn().mockResolvedValue({ id: "msg-1", status: "pending" }),
+    markFailed: vi.fn().mockResolvedValue(undefined),
+  }),
+  blocklistService: () => ({
+    create: vi.fn(),
+    listForAgent: vi.fn().mockResolvedValue([]),
+    listForCompany: vi.fn().mockResolvedValue([]),
+    update: vi.fn(),
+    remove: vi.fn(),
+    getActiveRules: vi.fn().mockResolvedValue([]),
+    formatForPrompt: vi.fn().mockReturnValue(""),
+  }),
+  companySetupSkillService: () => ({}),
   accessService: () => mockAccessService,
   approvalService: () => ({}),
   companySkillService: () => ({ listRuntimeSkillEntries: vi.fn() }),

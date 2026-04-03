@@ -1,8 +1,23 @@
+-- Agent chat threads table
+CREATE TABLE IF NOT EXISTS "agent_chat_threads" (
+  "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+  "company_id" uuid NOT NULL REFERENCES "companies"("id"),
+  "agent_id" uuid NOT NULL REFERENCES "agents"("id"),
+  "issue_id" uuid REFERENCES "issues"("id"),
+  "title" text,
+  "created_at" timestamp with time zone NOT NULL DEFAULT now(),
+  "updated_at" timestamp with time zone NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS "agent_chat_threads_agent_idx" ON "agent_chat_threads" ("agent_id");
+CREATE INDEX IF NOT EXISTS "agent_chat_threads_agent_issue_idx" ON "agent_chat_threads" ("agent_id", "issue_id");
+
 -- Agent messages table for chat/steering
 CREATE TABLE IF NOT EXISTS "agent_messages" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
   "company_id" uuid NOT NULL REFERENCES "companies"("id"),
   "agent_id" uuid NOT NULL REFERENCES "agents"("id"),
+  "thread_id" uuid REFERENCES "agent_chat_threads"("id"),
   "run_id" uuid REFERENCES "heartbeat_runs"("id"),
   "issue_id" uuid REFERENCES "issues"("id"),
   "sender_type" text NOT NULL,

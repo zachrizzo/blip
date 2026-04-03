@@ -323,6 +323,69 @@
       "when": 1774530504348,
       "tag": "0045_workable_shockwave",
       "breakpoints": true
+    },
+    {
+      "idx": 46,
+      "version": "7",
+      "when": 1774530600000,
+      "tag": "0046_agent_interaction_features",
+      "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1774530700000,
+      "tag": "0047_company_onboarding_fields",
+      "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "7",
+      "when": 1774530800000,
+      "tag": "0048_runs_thread_id",
+      "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "7",
+      "when": 1774530900000,
+      "tag": "0049_company_leader_agent",
+      "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1774531000000,
+      "tag": "0050_board_columns_config",
+      "breakpoints": true
+    },
+    {
+      "idx": 51,
+      "version": "7",
+      "when": 1774531100000,
+      "tag": "0051_project_workflows",
+      "breakpoints": true
+    },
+    {
+      "idx": 52,
+      "version": "7",
+      "when": 1774531200000,
+      "tag": "0052_project_approval_settings",
+      "breakpoints": true
+    },
+    {
+      "idx": 53,
+      "version": "7",
+      "when": 1774531300000,
+      "tag": "0053_done_gate",
+      "breakpoints": true
+    },
+    {
+      "idx": 54,
+      "version": "7",
+      "when": 1774531400000,
+      "tag": "0054_agent_chat_thread_unique",
+      "breakpoints": true
     }
   ]
 }

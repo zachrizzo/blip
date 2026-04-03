@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import { and, asc, desc, eq, inArray, isNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agentMessages, agentChatThreads, heartbeatRuns, issues } from "@paperclipai/db";
@@ -79,18 +80,31 @@ export function agentMessageService(db: Db) {
     issueId: string,
     issueTitle?: string | null,
   ): Promise<AgentChatThread> {
+    // Use provided title or simple fallback (issue ID prefix).
+    // IMPORTANT: Do NOT query the issues table here to avoid deadlocks.
+    const title = issueTitle ?? issueId.slice(0, 8);
+
+    // Atomic upsert: INSERT ... ON CONFLICT DO UPDATE (no-op) handles
+    // concurrent callers without creating duplicate threads.
+    const rows = await db
+      .insert(agentChatThreads)
+      .values({ companyId, agentId, issueId, title })
+      .onConflictDoUpdate({
+        target: [agentChatThreads.agentId, agentChatThreads.issueId],
+        set: { updatedAt: agentChatThreads.updatedAt },
+      })
+      .returning();
+
+    if (rows[0]) return rows[0];
+
+    // Fallback if the upsert returned nothing (should not happen).
     const existing = await db
       .select()
       .from(agentChatThreads)
       .where(and(eq(agentChatThreads.agentId, agentId), eq(agentChatThreads.issueId, issueId)));
     if (existing[0]) return existing[0];
 
-    // Use provided title or simple fallback (issue ID prefix)
-    // IMPORTANT: Do NOT query the issues table here to avoid deadlocks
-    // The title can be updated later or retrieved from the UI
-    const title = issueTitle ?? issueId.slice(0, 8);
-
-    return createThread({ companyId, agentId, issueId, title });
+    throw new Error(`Failed to get or create thread for issue ${issueId}`);
   }
 
   async function getRunForThread(threadId: string): Promise<typeof heartbeatRuns.$inferSelect | null> {
@@ -118,6 +132,19 @@ export function agentMessageService(db: Db) {
       .from(agentMessages)
       .where(and(eq(agentMessages.agentId, agentId), eq(agentMessages.status, "pending")))
       .orderBy(asc(agentMessages.createdAt));
+  }
+
+  /** Like getPendingMessages but uses FOR UPDATE SKIP LOCKED to prevent
+   *  concurrent runs from delivering the same messages more than once.
+   *  Must be called inside a database transaction. */
+  async function getPendingMessagesForDelivery(agentId: string): Promise<AgentMessage[]> {
+    const result = await db.execute(
+      sql`SELECT * FROM agent_messages
+          WHERE agent_id = ${agentId} AND status = 'pending'
+          ORDER BY created_at ASC
+          FOR UPDATE SKIP LOCKED`,
+    );
+    return Array.from(result) as unknown as AgentMessage[];
   }
 
   async function getMessagesForRun(runId: string): Promise<AgentMessage[]> {
@@ -178,6 +205,13 @@ export function agentMessageService(db: Db) {
       .where(inArray(agentMessages.id, messageIds));
   }
 
+  async function markFailed(messageId: string): Promise<void> {
+    await db
+      .update(agentMessages)
+      .set({ status: "failed", updatedAt: new Date() })
+      .where(eq(agentMessages.id, messageId));
+  }
+
   async function listForAgent(agentId: string, limit = 50): Promise<AgentMessage[]> {
     return db
       .select()
@@ -195,10 +229,12 @@ export function agentMessageService(db: Db) {
     touchThread,
     getRunForThread,
     getPendingMessages,
+    getPendingMessagesForDelivery,
     getMessagesForRun,
     getMessagesForThread,
     sendMessage,
     markDelivered,
+    markFailed,
     listForAgent,
   };
 }

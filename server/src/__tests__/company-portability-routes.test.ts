@@ -36,9 +36,17 @@ const mockLogActivity = vi.hoisted(() => vi.fn());
 vi.mock("../services/index.js", () => ({
   accessService: () => mockAccessService,
   agentService: () => mockAgentService,
+  agentMessageService: () => ({
+    createThread: vi.fn().mockResolvedValue({ id: "thread-1" }),
+    getOrCreateThreadForIssue: vi.fn().mockResolvedValue({ id: "thread-1" }),
+    listThreads: vi.fn().mockResolvedValue([]),
+    getMessagesForThread: vi.fn().mockResolvedValue([]),
+  }),
   budgetService: () => mockBudgetService,
   companyPortabilityService: () => mockCompanyPortabilityService,
   companyService: () => mockCompanyService,
+  companySetupSkillService: () => ({}),
+  heartbeatService: () => ({}),
   logActivity: mockLogActivity,
 }));
 

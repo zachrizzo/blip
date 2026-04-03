@@ -175,15 +175,19 @@ export function agentRoutes(db: Db) {
     agentId: string,
     grantedByUserId: string | null,
   ) {
-    await access.ensureMembership(companyId, "agent", agentId, "member", "active");
-    await access.setPrincipalPermission(
-      companyId,
-      "agent",
-      agentId,
-      "tasks:assign",
-      true,
-      grantedByUserId,
-    );
+    // Run both operations atomically so we never have an agent with membership
+    // but without the required tasks:assign permission.
+    await db.transaction(async () => {
+      await access.ensureMembership(companyId, "agent", agentId, "member", "active");
+      await access.setPrincipalPermission(
+        companyId,
+        "agent",
+        agentId,
+        "tasks:assign",
+        true,
+        grantedByUserId,
+      );
+    });
   }
 
   async function assertCanCreateAgentsForCompany(req: Request, companyId: string) {
@@ -1401,11 +1405,17 @@ export function agentRoutes(db: Db) {
       },
     });
 
-    await applyDefaultAgentTaskAssignGrant(
-      companyId,
-      agent.id,
-      req.actor.type === "board" ? (req.actor.userId ?? null) : null,
-    );
+    try {
+      await applyDefaultAgentTaskAssignGrant(
+        companyId,
+        agent.id,
+        req.actor.type === "board" ? (req.actor.userId ?? null) : null,
+      );
+    } catch (grantErr) {
+      // Delete the just-created agent to avoid an agent without default permissions.
+      await svc.remove(agent.id).catch(() => {});
+      throw grantErr;
+    }
 
     if (agent.budgetMonthlyCents > 0) {
       await budgets.upsertPolicy(
@@ -2456,9 +2466,33 @@ export function agentRoutes(db: Db) {
     if (!messageBody?.trim()) { res.status(400).json({ error: "body is required" }); return; }
 
     const actor = getActorInfo(req);
+
+    // Resolve or create thread upfront so the message is always threaded
+    // and never stuck in pending without a run to deliver it.
+    let resolvedThreadId: string | null = null;
+    if (issueId) {
+      const thread = await messages.getOrCreateThreadForIssue(agent.companyId, agentId, issueId);
+      resolvedThreadId = thread.id;
+    } else {
+      const now = new Date();
+      const label = now.toLocaleString("en-US", {
+        month: "short", day: "numeric",
+        hour: "numeric", minute: "2-digit",
+        hour12: true,
+        timeZone: "UTC",
+      });
+      const thread = await messages.createThread({
+        companyId: agent.companyId,
+        agentId,
+        title: `On-demand · ${label}`,
+      });
+      resolvedThreadId = thread.id;
+    }
+
     const msg = await messages.sendMessage({
       companyId: agent.companyId,
       agentId,
+      threadId: resolvedThreadId,
       issueId,
       senderType: "user",
       senderId: actor.actorId ?? undefined,
@@ -2488,6 +2522,7 @@ export function agentRoutes(db: Db) {
           source: "on_demand",
           triggerDetail: "manual",
           reason: `User message: ${messageBody.trim().slice(0, 100)}`,
+          threadId: resolvedThreadId ?? undefined,
           payload: {
             userMessage: messageBody.trim(),
             ...(lastRun ? { resumeFromRunId: lastRun.id } : {}),
@@ -2498,7 +2533,8 @@ export function agentRoutes(db: Db) {
         wakeupTriggered = true;
       }
     } catch (e) {
-      // Non-fatal — message is saved even if wakeup fails
+      // Mark the message as failed so it doesn't remain pending indefinitely.
+      await messages.markFailed(msg.id).catch(() => {});
     }
 
     res.json({ ...msg, wakeupTriggered });

@@ -5,6 +5,7 @@ import request from "supertest";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
+  agentChatThreads,
   agentWakeupRequests,
   agents,
   companies,
@@ -31,7 +32,7 @@ vi.mock("../services/index.js", async () => {
   const actual = await vi.importActual<typeof import("../services/index.js")>("../services/index.js");
   const { randomUUID } = await import("node:crypto");
   const { eq } = await import("drizzle-orm");
-  const { heartbeatRuns, issues } = await import("@paperclipai/db");
+  const { agentChatThreads, heartbeatRuns, issues } = await import("@paperclipai/db");
 
   return {
     ...actual,
@@ -53,6 +54,14 @@ vi.mock("../services/index.js", async () => {
             if (!issue) return null;
 
             const queuedRunId = randomUUID();
+            const threadId = randomUUID();
+            await db.insert(agentChatThreads).values({
+              id: threadId,
+              companyId: issue.companyId,
+              agentId,
+              issueId,
+              title: "Routine execution",
+            });
             await db.insert(heartbeatRuns).values({
               id: queuedRunId,
               companyId: issue.companyId,
@@ -60,6 +69,7 @@ vi.mock("../services/index.js", async () => {
               invocationSource: wakeupOpts?.source ?? "assignment",
               triggerDetail: wakeupOpts?.triggerDetail ?? null,
               status: "queued",
+              threadId,
               contextSnapshot: { ...(wakeupOpts?.contextSnapshot ?? {}), issueId },
             });
             await db
@@ -100,6 +110,7 @@ describeEmbeddedPostgres("routine routes end-to-end", () => {
     await db.delete(routineTriggers);
     await db.delete(heartbeatRunEvents);
     await db.delete(heartbeatRuns);
+    await db.delete(agentChatThreads);
     await db.delete(agentWakeupRequests);
     await db.delete(issues);
     await db.delete(principalPermissionGrants);

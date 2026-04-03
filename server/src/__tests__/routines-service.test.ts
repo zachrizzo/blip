@@ -3,6 +3,7 @@ import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   activityLog,
+  agentChatThreads,
   agents,
   companies,
   companySecrets,
@@ -35,6 +36,18 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
   let db!: ReturnType<typeof createDb>;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
 
+  async function createThread(companyId: string, agentId: string, issueId: string | null) {
+    const threadId = randomUUID();
+    await db.insert(agentChatThreads).values({
+      id: threadId,
+      companyId,
+      agentId,
+      issueId,
+      title: issueId ? "Routine execution" : "Routine wakeup",
+    });
+    return threadId;
+  }
+
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-routines-service-");
     db = createDb(tempDb.connectionString);
@@ -48,6 +61,7 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
     await db.delete(companySecretVersions);
     await db.delete(companySecrets);
     await db.delete(heartbeatRuns);
+    await db.delete(agentChatThreads);
     await db.delete(issues);
     await db.delete(projects);
     await db.delete(agents);
@@ -88,7 +102,6 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
         contextSnapshot?: Record<string, unknown>;
       };
     }> = [];
-
     await db.insert(companies).values({
       id: companyId,
       name: "Paperclip",
@@ -126,6 +139,7 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
             null;
           if (!issueId) return null;
           const queuedRunId = randomUUID();
+          const threadId = await createThread(companyId, wakeupAgentId, issueId);
           await db.insert(heartbeatRuns).values({
             id: queuedRunId,
             companyId,
@@ -133,6 +147,7 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
             invocationSource: wakeupOpts.source ?? "assignment",
             triggerDetail: wakeupOpts.triggerDetail ?? null,
             status: "queued",
+            threadId,
             contextSnapshot: { ...(wakeupOpts.contextSnapshot ?? {}), issueId },
           });
           await db
@@ -287,6 +302,7 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
       invocationSource: "assignment",
       triggerDetail: "system",
       status: "running",
+      threadId: await createThread(companyId, agentId, previousIssue.id),
       contextSnapshot: { issueId: previousIssue.id },
       startedAt: new Date("2026-03-20T12:01:00.000Z"),
     });
@@ -327,6 +343,7 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
         await new Promise((resolve) => setTimeout(resolve, 25));
         if (!issueId) return null;
         const queuedRunId = randomUUID();
+        const threadId = await createThread(routine.companyId, wakeupAgentId, issueId);
         await db.insert(heartbeatRuns).values({
           id: queuedRunId,
           companyId: routine.companyId,
@@ -334,6 +351,7 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
           invocationSource: wakeupOpts.source ?? "assignment",
           triggerDetail: wakeupOpts.triggerDetail ?? null,
           status: "queued",
+          threadId,
           contextSnapshot: { ...(wakeupOpts.contextSnapshot ?? {}), issueId },
         });
         await db

@@ -1,4 +1,5 @@
-import { pgTable, uuid, text, timestamp, index } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
+import { pgTable, uuid, text, timestamp, index, uniqueIndex } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
 import { agents } from "./agents.js";
 import { issues } from "./issues.js";
@@ -16,6 +17,8 @@ export const agentChatThreads = pgTable(
   },
   (table) => ({
     agentIdx: index("agent_chat_threads_agent_idx").on(table.agentId),
-    agentIssueIdx: index("agent_chat_threads_agent_issue_idx").on(table.agentId, table.issueId),
+    agentIssueUq: uniqueIndex("agent_chat_threads_agent_issue_uq")
+      .on(table.agentId, table.issueId)
+      .where(sql`issue_id IS NOT NULL`),
   }),
 );

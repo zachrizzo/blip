@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
+  agentChatThreads,
   agents,
   companies,
   createDb,
@@ -1260,6 +1261,7 @@ describeEmbeddedPostgres("workspace runtime startup reconciliation", () => {
     await db.delete(executionWorkspaces);
     await db.delete(projects);
     await db.delete(heartbeatRuns);
+    await db.delete(agentChatThreads);
     await db.delete(agents);
     await db.delete(companies);
   });
@@ -1273,6 +1275,7 @@ describeEmbeddedPostgres("workspace runtime startup reconciliation", () => {
     const companyId = randomUUID();
     const agentId = randomUUID();
     const runId = randomUUID();
+    const threadId = randomUUID();
     const executionWorkspaceId = randomUUID();
 
     await db.insert(companies).values({
@@ -1292,12 +1295,20 @@ describeEmbeddedPostgres("workspace runtime startup reconciliation", () => {
       runtimeConfig: {},
       permissions: {},
     });
+    await db.insert(agentChatThreads).values({
+      id: threadId,
+      companyId,
+      agentId,
+      issueId: null,
+      title: "Runtime reconcile thread",
+    });
     await db.insert(heartbeatRuns).values({
       id: runId,
       companyId,
       agentId,
       invocationSource: "manual",
       status: "running",
+      threadId,
       startedAt: new Date(),
       updatedAt: new Date(),
     });
@@ -1378,6 +1389,7 @@ describeEmbeddedPostgres("workspace runtime startup reconciliation", () => {
     const agentId = randomUUID();
     const projectId = randomUUID();
     const runId = randomUUID();
+    const threadId = randomUUID();
     const executionWorkspaceId = randomUUID();
 
     await db.insert(companies).values({
@@ -1415,12 +1427,20 @@ describeEmbeddedPostgres("workspace runtime startup reconciliation", () => {
       providerType: "local_fs",
       providerRef: workspaceRoot,
     });
+    await db.insert(agentChatThreads).values({
+      id: threadId,
+      companyId,
+      agentId,
+      issueId: null,
+      title: "Runtime stop thread",
+    });
     await db.insert(heartbeatRuns).values({
       id: runId,
       companyId,
       agentId,
       invocationSource: "manual",
       status: "running",
+      threadId,
       startedAt: new Date(),
       updatedAt: new Date(),
     });

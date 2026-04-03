@@ -3,6 +3,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
+  agentChatThreads,
   agents,
   agentWakeupRequests,
   companies,
@@ -51,6 +52,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     await db.delete(issues);
     await db.delete(heartbeatRunEvents);
     await db.delete(heartbeatRuns);
+    await db.delete(agentChatThreads);
     await db.delete(agentWakeupRequests);
     await db.delete(agents);
     await db.delete(companies);
@@ -79,6 +81,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     const runId = randomUUID();
     const wakeupRequestId = randomUUID();
     const issueId = randomUUID();
+    const threadId = randomUUID();
     const now = new Date("2026-03-19T00:00:00.000Z");
     const issuePrefix = `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`;
 
@@ -114,6 +117,14 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       claimedAt: now,
     });
 
+    await db.insert(agentChatThreads).values({
+      id: threadId,
+      companyId,
+      agentId,
+      issueId: null,
+      title: input?.includeIssue === false ? "Recovery thread" : "Recovery issue thread",
+    });
+
     await db.insert(heartbeatRuns).values({
       id: runId,
       companyId,
@@ -122,6 +133,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       triggerDetail: "system",
       status: input?.runStatus ?? "running",
       wakeupRequestId,
+      threadId,
       contextSnapshot: input?.includeIssue === false ? {} : { issueId },
       processPid: input?.processPid ?? null,
       processLossRetryCount: input?.processLossRetryCount ?? 0,
@@ -233,7 +245,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       .where(eq(issues.id, issueId))
       .then((rows) => rows[0] ?? null);
     expect(issue?.executionRunId).toBeNull();
-    expect(issue?.checkoutRunId).toBe(runId);
+    expect(issue?.checkoutRunId).toBeNull();
   });
 
   it("clears the detached warning when the run reports activity again", async () => {
@@ -251,5 +263,23 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     const run = await heartbeat.getRun(runId);
     expect(run?.errorCode).toBeNull();
     expect(run?.error).toBeNull();
+  });
+
+  it("clears stale checkout state when an orphaned execution lock references a terminal run", async () => {
+    const { issueId } = await seedRunFixture({
+      runStatus: "failed",
+    });
+    const heartbeat = heartbeatService(db);
+
+    const cleared = await heartbeat.clearOrphanedIssueLocks();
+    expect(cleared).toBe(1);
+
+    const issue = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0] ?? null);
+    expect(issue?.executionRunId).toBeNull();
+    expect(issue?.checkoutRunId).toBeNull();
   });
 });
