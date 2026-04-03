@@ -1,5 +1,5 @@
 import type { AdapterModel } from "./types.js";
-import { models as claudeFallbackModels } from "@paperclipai/adapter-claude-local";
+import { models as claudeFallbackModels, bedrockModels as claudeBedrockModels } from "@paperclipai/adapter-claude-local";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -143,27 +143,45 @@ async function fetchAnthropicModels(headers: AuthHeaders): Promise<AdapterModel[
   }
 }
 
+/** True when the server process is configured for AWS Bedrock. */
+function isBedrockEnabled(): boolean {
+  return (
+    process.env.CLAUDE_CODE_USE_BEDROCK === "1" ||
+    Boolean(process.env.AWS_BEDROCK_BASE_URL?.trim())
+  );
+}
+
 export async function listClaudeModels(): Promise<AdapterModel[]> {
+  const bedrock = isBedrockEnabled();
+
   const auth = await resolveAuthHeaders();
-  if (!auth) return dedupeModels(claudeFallbackModels);
+
+  // When no Anthropic auth is available, fall back to static lists.
+  if (!auth) {
+    const base = dedupeModels(claudeFallbackModels);
+    return bedrock ? dedupeModels([...claudeBedrockModels, ...base]) : base;
+  }
 
   const now = Date.now();
   if (cached && cached.keyFingerprint === auth.fp && cached.expiresAt > now) {
-    return cached.models;
+    const models = cached.models;
+    return bedrock ? dedupeModels([...claudeBedrockModels, ...models]) : models;
   }
 
   const fetched = await fetchAnthropicModels(auth.headers);
   if (fetched.length > 0) {
     const merged = mergedWithFallback(fetched);
     cached = { keyFingerprint: auth.fp, expiresAt: now + ANTHROPIC_MODELS_CACHE_TTL_MS, models: merged };
-    return merged;
+    return bedrock ? dedupeModels([...claudeBedrockModels, ...merged]) : merged;
   }
 
   if (cached && cached.keyFingerprint === auth.fp && cached.models.length > 0) {
-    return cached.models;
+    const models = cached.models;
+    return bedrock ? dedupeModels([...claudeBedrockModels, ...models]) : models;
   }
 
-  return dedupeModels(claudeFallbackModels);
+  const base = dedupeModels(claudeFallbackModels);
+  return bedrock ? dedupeModels([...claudeBedrockModels, ...base]) : base;
 }
 
 export function resetClaudeModelsCacheForTests() {

@@ -9,6 +9,23 @@ export const models = [
   { id: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5" },
 ];
 
+/** Bedrock cross-region inference profile model IDs (us / global / eu / ap prefixes). */
+export const bedrockModels = [
+  // US cross-region inference profiles
+  { id: "us.anthropic.claude-opus-4-6-20251001-v1:0", label: "Claude Opus 4.6 (Bedrock US)" },
+  { id: "us.anthropic.claude-sonnet-4-6-20251101-v1:0", label: "Claude Sonnet 4.6 (Bedrock US)" },
+  { id: "us.anthropic.claude-sonnet-4-5-20250929-v1:0", label: "Claude Sonnet 4.5 (Bedrock US)" },
+  { id: "us.anthropic.claude-haiku-4-5-20251001-v1:0", label: "Claude Haiku 4.5 (Bedrock US)" },
+  // Global cross-region inference profiles
+  { id: "global.anthropic.claude-opus-4-6-20251001-v1:0", label: "Claude Opus 4.6 (Bedrock Global)" },
+  { id: "global.anthropic.claude-sonnet-4-6-20251101-v1:0", label: "Claude Sonnet 4.6 (Bedrock Global)" },
+  { id: "global.anthropic.claude-sonnet-4-5-20250929-v1:0", label: "Claude Sonnet 4.5 (Bedrock Global)" },
+  { id: "global.anthropic.claude-haiku-4-5-20251001-v1:0", label: "Claude Haiku 4.5 (Bedrock Global)" },
+  // EU cross-region inference profiles
+  { id: "eu.anthropic.claude-sonnet-4-5-20250929-v1:0", label: "Claude Sonnet 4.5 (Bedrock EU)" },
+  { id: "eu.anthropic.claude-haiku-4-5-20251001-v1:0", label: "Claude Haiku 4.5 (Bedrock EU)" },
+];
+
 export const agentConfigurationDoc = `# claude_local agent configuration
 
 Adapter: claude_local
