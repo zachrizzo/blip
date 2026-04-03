@@ -1,5 +1,8 @@
 import type { AdapterModel } from "./types.js";
-import { models as claudeFallbackModels, bedrockModels as claudeBedrockModels } from "@paperclipai/adapter-claude-local";
+import { models as claudeFallbackModels, bedrockModels as _claudeBedrockModels } from "@paperclipai/adapter-claude-local";
+
+// Inline Bedrock models so tsx watch picks up changes without requiring a package rebuild.
+const claudeBedrockModels: AdapterModel[] = _claudeBedrockModels;
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -143,45 +146,34 @@ async function fetchAnthropicModels(headers: AuthHeaders): Promise<AdapterModel[
   }
 }
 
-/** True when the server process is configured for AWS Bedrock. */
-function isBedrockEnabled(): boolean {
-  return (
-    process.env.CLAUDE_CODE_USE_BEDROCK === "1" ||
-    Boolean(process.env.AWS_BEDROCK_BASE_URL?.trim())
-  );
+/** Merge fetched/fallback models with the static Bedrock list.
+ *  Bedrock models are always included so users can pick them regardless
+ *  of whether the server process itself has CLAUDE_CODE_USE_BEDROCK set. */
+function withBedrockModels(models: AdapterModel[]): AdapterModel[] {
+  return dedupeModels([...claudeBedrockModels, ...models]);
 }
 
 export async function listClaudeModels(): Promise<AdapterModel[]> {
-  const bedrock = isBedrockEnabled();
-
   const auth = await resolveAuthHeaders();
-
-  // When no Anthropic auth is available, fall back to static lists.
-  if (!auth) {
-    const base = dedupeModels(claudeFallbackModels);
-    return bedrock ? dedupeModels([...claudeBedrockModels, ...base]) : base;
-  }
+  if (!auth) return withBedrockModels(dedupeModels(claudeFallbackModels));
 
   const now = Date.now();
   if (cached && cached.keyFingerprint === auth.fp && cached.expiresAt > now) {
-    const models = cached.models;
-    return bedrock ? dedupeModels([...claudeBedrockModels, ...models]) : models;
+    return withBedrockModels(cached.models);
   }
 
   const fetched = await fetchAnthropicModels(auth.headers);
   if (fetched.length > 0) {
     const merged = mergedWithFallback(fetched);
     cached = { keyFingerprint: auth.fp, expiresAt: now + ANTHROPIC_MODELS_CACHE_TTL_MS, models: merged };
-    return bedrock ? dedupeModels([...claudeBedrockModels, ...merged]) : merged;
+    return withBedrockModels(merged);
   }
 
   if (cached && cached.keyFingerprint === auth.fp && cached.models.length > 0) {
-    const models = cached.models;
-    return bedrock ? dedupeModels([...claudeBedrockModels, ...models]) : models;
+    return withBedrockModels(cached.models);
   }
 
-  const base = dedupeModels(claudeFallbackModels);
-  return bedrock ? dedupeModels([...claudeBedrockModels, ...base]) : base;
+  return withBedrockModels(dedupeModels(claudeFallbackModels));
 }
 
 export function resetClaudeModelsCacheForTests() {
