@@ -22,7 +22,7 @@ import {
   projects,
 } from "@paperclipai/db";
 import { extractAgentMentionIds, extractProjectMentionIds } from "@paperclipai/shared";
-import { conflict, notFound, unprocessable } from "../errors.js";
+import { conflict, forbidden, notFound, unprocessable } from "../errors.js";
 import {
   defaultIssueExecutionWorkspaceSettingsForProject,
   gateProjectExecutionWorkspacePolicy,
@@ -34,8 +34,21 @@ import { redactCurrentUserText } from "../log-redaction.js";
 import { resolveIssueGoalId, resolveNextIssueGoalId } from "./issue-goal-fallback.js";
 import { getDefaultCompanyGoal } from "./goals.js";
 
-const ALL_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked", "done", "cancelled"];
+const ALL_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "qa_review", "blocked", "done", "cancelled"];
 const MAX_ISSUE_COMMENT_PAGE_LIMIT = 500;
+
+/**
+ * Generates a PostgreSQL advisory lock ID from an issue ID (UUID).
+ * Advisory locks prevent concurrent modifications to the same issue,
+ * eliminating circular deadlocks from row locks + foreign key checks.
+ *
+ * Uses the first 16 hex chars of the UUID (without dashes) as a 64-bit int.
+ * Example: "550e8400-e29b-41d4-a716-446655440000" → 0x550e8400e29b41d4
+ */
+function getIssueAdvisoryLockId(issueId: string): bigint {
+  const hex = issueId.replace(/-/g, '').substring(0, 16);
+  return BigInt('0x' + hex);
+}
 
 function assertTransition(from: string, to: string) {
   if (from === to) return;
@@ -47,6 +60,7 @@ function assertTransition(from: string, to: string) {
 function applyStatusSideEffects(
   status: string | undefined,
   patch: Partial<typeof issues.$inferInsert>,
+  actor?: { agentId?: string | null; userId?: string | null },
 ): Partial<typeof issues.$inferInsert> {
   if (!status) return patch;
 
@@ -55,6 +69,8 @@ function applyStatusSideEffects(
   }
   if (status === "done") {
     patch.completedAt = new Date();
+    patch.closedByAgentId = actor?.agentId ?? null;
+    patch.closedByUserId = actor?.userId ?? null;
   }
   if (status === "cancelled") {
     patch.cancelledAt = new Date();
@@ -118,6 +134,14 @@ function sameRunLock(checkoutRunId: string | null, actorRunId: string | null) {
 }
 
 const TERMINAL_HEARTBEAT_RUN_STATUSES = new Set(["succeeded", "failed", "cancelled", "timed_out"]);
+const ACTIVE_RUN_STATUSES: string[] = ["queued", "running"];
+
+/** Shared patch to clear the execution lock fields on an issue. */
+const CLEAR_EXECUTION_LOCK_PATCH = {
+  executionRunId: null,
+  executionAgentNameKey: null,
+  executionLockedAt: null,
+} as const;
 
 function escapeLikePattern(value: string): string {
   return value.replace(/[\\%_]/g, "\\$&");
@@ -417,8 +441,6 @@ async function withIssueLabels(dbOrTx: any, rows: IssueRow[]): Promise<IssueWith
   });
 }
 
-const ACTIVE_RUN_STATUSES = ["queued", "running"];
-
 async function activeRunMapForIssues(
   dbOrTx: any,
   issueRows: IssueWithLabels[],
@@ -472,6 +494,33 @@ export function issueService(db: Db) {
       ...comment,
       body: redactCurrentUserText(comment.body, { enabled: censorUsernameInLogs }),
     };
+  }
+
+  async function assertCanMoveToDone(
+    issueId: string,
+    actor: { type: "board" | "agent" | "none"; agentId?: string | null },
+  ) {
+    if (actor.type === "board") return; // board users always exempt
+
+    const issueRow = await db
+      .select({ projectId: issues.projectId })
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0] ?? null);
+    if (!issueRow?.projectId) return; // no project = no gate
+
+    const projectRow = await db
+      .select({ doneGateAgentIds: projects.doneGateAgentIds })
+      .from(projects)
+      .where(eq(projects.id, issueRow.projectId))
+      .then((rows) => rows[0] ?? null);
+
+    const gateIds = projectRow?.doneGateAgentIds;
+    if (!gateIds || gateIds.length === 0) return; // gate not configured
+
+    if (!actor.agentId || !gateIds.includes(actor.agentId)) {
+      throw forbidden("This project restricts which agents can mark issues as done.");
+    }
   }
 
   async function assertAssignableAgent(companyId: string, agentId: string) {
@@ -1057,7 +1106,13 @@ export function issueService(db: Db) {
       });
     },
 
-    update: async (id: string, data: Partial<typeof issues.$inferInsert> & { labelIds?: string[] }) => {
+    assertCanMoveToDone,
+
+    update: async (
+      id: string,
+      data: Partial<typeof issues.$inferInsert> & { labelIds?: string[] },
+      actor?: { agentId?: string | null; userId?: string | null },
+    ) => {
       const existing = await db
         .select()
         .from(issues)
@@ -1111,24 +1166,33 @@ export function issueService(db: Db) {
         await assertValidExecutionWorkspace(existing.companyId, nextProjectId, nextExecutionWorkspaceId);
       }
 
-      applyStatusSideEffects(issueData.status, patch);
+      applyStatusSideEffects(issueData.status, patch, actor);
       if (issueData.status && issueData.status !== "done") {
         patch.completedAt = null;
+        patch.closedByAgentId = null;
+        patch.closedByUserId = null;
       }
       if (issueData.status && issueData.status !== "cancelled") {
         patch.cancelledAt = null;
       }
       if (issueData.status && issueData.status !== "in_progress") {
         patch.checkoutRunId = null;
+        Object.assign(patch, CLEAR_EXECUTION_LOCK_PATCH);
       }
       if (
         (issueData.assigneeAgentId !== undefined && issueData.assigneeAgentId !== existing.assigneeAgentId) ||
         (issueData.assigneeUserId !== undefined && issueData.assigneeUserId !== existing.assigneeUserId)
       ) {
         patch.checkoutRunId = null;
+        Object.assign(patch, CLEAR_EXECUTION_LOCK_PATCH);
       }
 
       return db.transaction(async (tx) => {
+        // Acquire advisory lock to serialize concurrent updates to this issue.
+        // This prevents circular deadlocks from row locks + foreign key checks.
+        const lockId = getIssueAdvisoryLockId(id);
+        await tx.execute(sql`SELECT pg_advisory_xact_lock(${lockId})`);
+
         const defaultCompanyGoal = await getDefaultCompanyGoal(tx, existing.companyId);
         const [currentProjectGoalId, nextProjectGoalId] = await Promise.all([
           getProjectDefaultGoalId(tx, existing.companyId, existing.projectId),
@@ -1410,6 +1474,7 @@ export function issueService(db: Db) {
           status: "todo",
           assigneeAgentId: null,
           checkoutRunId: null,
+          ...CLEAR_EXECUTION_LOCK_PATCH,
           updatedAt: new Date(),
         })
         .where(eq(issues.id, id))
