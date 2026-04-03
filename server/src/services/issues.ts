@@ -47,7 +47,12 @@ const MAX_ISSUE_COMMENT_PAGE_LIMIT = 500;
  */
 function getIssueAdvisoryLockId(issueId: string): bigint {
   const hex = issueId.replace(/-/g, '').substring(0, 16);
-  return BigInt('0x' + hex);
+  const unsigned = BigInt('0x' + hex);
+  // PostgreSQL advisory locks take a signed 64-bit integer.
+  // Convert unsigned BigInt to signed by wrapping values that exceed INT64_MAX.
+  const INT64_MAX = BigInt('9223372036854775807');
+  const UINT64 = BigInt('18446744073709551616');
+  return unsigned > INT64_MAX ? unsigned - UINT64 : unsigned;
 }
 
 function assertTransition(from: string, to: string) {
