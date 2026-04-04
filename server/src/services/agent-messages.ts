@@ -84,21 +84,37 @@ export function agentMessageService(db: Db) {
     // IMPORTANT: Do NOT query the issues table here to avoid deadlocks.
     const title = issueTitle ?? issueId.slice(0, 8);
 
-    // Atomic upsert: INSERT ... ON CONFLICT DO UPDATE (no-op) handles
-    // concurrent callers without creating duplicate threads.
-    const rows = await db
-      .insert(agentChatThreads)
-      .values({ companyId, agentId, issueId, title })
-      .onConflictDoUpdate({
-        target: [agentChatThreads.agentId, agentChatThreads.issueId],
-        set: { updatedAt: agentChatThreads.updatedAt },
-      })
-      .returning();
-
-    if (rows[0]) return rows[0];
-
-    // Fallback if the upsert returned nothing (should not happen).
+    // Find existing thread first, create if not found.
+    // We avoid ON CONFLICT because the unique index is partial (WHERE issue_id IS NOT NULL)
+    // and Drizzle's onConflictDoUpdate can't target partial indexes.
     const existing = await db
+      .select()
+      .from(agentChatThreads)
+      .where(and(eq(agentChatThreads.agentId, agentId), eq(agentChatThreads.issueId, issueId)));
+
+    if (existing[0]) return existing[0];
+
+    try {
+      const rows = await db
+        .insert(agentChatThreads)
+        .values({ companyId, agentId, issueId, title })
+        .returning();
+      if (rows[0]) return rows[0];
+    } catch (err: unknown) {
+      // Race condition: another caller inserted between our SELECT and INSERT.
+      // Re-query to get the existing row.
+      if (err && typeof err === "object" && "code" in err && (err as { code?: string }).code === "23505") {
+        const retry = await db
+          .select()
+          .from(agentChatThreads)
+          .where(and(eq(agentChatThreads.agentId, agentId), eq(agentChatThreads.issueId, issueId)));
+        if (retry[0]) return retry[0];
+      }
+      throw err;
+    }
+
+    // Fallback if neither path returned (should not happen).
+    const fallback = await db
       .select()
       .from(agentChatThreads)
       .where(and(eq(agentChatThreads.agentId, agentId), eq(agentChatThreads.issueId, issueId)));

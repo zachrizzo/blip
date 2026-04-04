@@ -1102,6 +1102,10 @@ export function issueService(db: Db) {
           issueNumber,
           identifier,
         } as typeof issues.$inferInsert;
+        // Auto-promote from backlog to todo when an assignee is set at creation
+        if (values.status === "backlog" && (values.assigneeAgentId || values.assigneeUserId)) {
+          values.status = "todo";
+        }
         if (values.status === "in_progress" && !values.startedAt) {
           values.startedAt = new Date();
         }
