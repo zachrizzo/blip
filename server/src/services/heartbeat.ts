@@ -30,6 +30,7 @@ import { budgetService, type BudgetEnforcementScope } from "./budgets.js";
 import { secretService } from "./secrets.js";
 import { blocklistService } from "./blocklist.js";
 import { agentMessageService } from "./agent-messages.js";
+import { enrichRunContext } from "./heartbeat-context-enrichment.js";
 import { resolveDefaultAgentWorkspaceDir, resolveManagedProjectWorkspaceDir } from "../home-paths.js";
 import { summarizeHeartbeatRunResultJson } from "./heartbeat-run-summary.js";
 import {
@@ -79,6 +80,23 @@ const SESSIONED_LOCAL_ADAPTERS = new Set([
   "opencode_local",
   "pi_local",
 ]);
+
+type RunErrorCode =
+  | "adapter_failed"
+  | "setup_failed"
+  | "workspace_failed"
+  | "auth_failed"
+  | "config_invalid"
+  | "budget_exceeded";
+
+function classifySetupError(err: unknown): RunErrorCode {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (/workspace|worktree|clone|git/i.test(msg)) return "workspace_failed";
+  if (/auth|jwt|token|key|permission|forbidden/i.test(msg)) return "auth_failed";
+  if (/config|missing.*command|adapter.*missing/i.test(msg)) return "config_invalid";
+  if (/budget|spend|cost.*limit/i.test(msg)) return "budget_exceeded";
+  return "setup_failed";
+}
 
 export function applyPersistedExecutionWorkspaceConfig(input: {
   config: Record<string, unknown>;
@@ -2222,6 +2240,25 @@ export function heartbeatService(db: Db) {
       (explicitResumeSessionDisplayId ? { sessionId: explicitResumeSessionDisplayId } : null) ??
       normalizeSessionParams(sessionCodec.deserialize(taskSessionForRun?.sessionParamsJson ?? null));
     const config = parseObject(agent.adapterConfig);
+
+    // Reconstruct instructionsFilePath from bundle metadata if missing
+    if (!config.instructionsFilePath && config.instructionsRootPath && config.instructionsEntryFile) {
+      const resolvedInstructionsPath = path.resolve(
+        String(config.instructionsRootPath),
+        String(config.instructionsEntryFile),
+      );
+      try {
+        await fs.access(resolvedInstructionsPath);
+        config.instructionsFilePath = resolvedInstructionsPath;
+      } catch {
+        logger.warn(
+          "Instructions file not found at %s for agent %s",
+          resolvedInstructionsPath,
+          agent.id,
+        );
+      }
+    }
+
     const requestedExecutionWorkspaceMode = resolveExecutionWorkspaceMode({
       projectPolicy: projectExecutionWorkspacePolicy,
       issueSettings: issueExecutionWorkspaceSettings,
@@ -2745,6 +2782,49 @@ export function heartbeatService(db: Db) {
         logger.warn(e, "Failed to load blocklist rules for agent %s", agent.id);
       }
 
+      // Inject context enrichment (company info, goals, org chain, budget)
+      try {
+        await enrichRunContext(db, agent, context);
+        try {
+          const enrichedCompany = context.paperclipCompany as { name?: string } | undefined;
+          await appendRunEvent(currentRun, seq++, {
+            eventType: "context.enriched",
+            stream: "system",
+            level: "info",
+            message: "Context enrichment applied",
+            payload: {
+              company: enrichedCompany?.name ?? null,
+              goalCount: Array.isArray(context.paperclipGoals) ? context.paperclipGoals.length : 0,
+              orgChainLength: Array.isArray(context.paperclipOrgChain) ? context.paperclipOrgChain.length : 0,
+              budget: context.paperclipBudget ?? null,
+              budgetWarning: (context.paperclipBudgetWarning as string) ?? null,
+            },
+          });
+        } catch (_logErr) {
+          // Non-fatal — don't block run for logging failure
+        }
+      } catch (e) {
+        logger.warn(e, "Failed to enrich run context for agent %s", agent.id);
+      }
+
+      // Inject available plugin tools into context so the agent knows what
+      // tools it can invoke via the execute-tool endpoint.
+      try {
+        const { getPluginToolDispatcher } = await import("./plugin-tool-dispatcher.js");
+        const dispatcher = getPluginToolDispatcher();
+        if (dispatcher) {
+          const tools = dispatcher.listToolsForAgent();
+          if (tools.length > 0) {
+            context.paperclipPluginTools = tools.slice(0, 20).map((t) => ({
+              name: t.name,
+              description: (t.description || "").slice(0, 200),
+            }));
+          }
+        }
+      } catch (e) {
+        logger.warn(e, "Failed to load plugin tools for agent %s", agent.id);
+      }
+
       // Inject pending messages into context and track threadId for response.
       // Uses FOR UPDATE SKIP LOCKED inside a transaction to prevent concurrent
       // runs from delivering the same messages more than once.
@@ -2805,6 +2885,24 @@ export function heartbeatService(db: Db) {
           }
         } catch (e) {
           logger.warn(e, "Failed to load thread history for thread %s", replyThreadId);
+        }
+      }
+
+      // Pre-run budget gate: re-check budget right before execution to catch
+      // spend that accrued between queue claim time and now.
+      if (agent.budgetMonthlyCents > 0) {
+        try {
+          const budgetBlock = await budgets.getInvocationBlock(agent.companyId, agent.id, {
+            issueId: readNonEmptyString(context.issueId),
+            projectId: readNonEmptyString(context.projectId),
+          });
+          if (budgetBlock) {
+            throw new Error(`Run blocked by budget: ${budgetBlock.reason}`);
+          }
+        } catch (e) {
+          // Re-throw budget errors so classifySetupError picks them up
+          if (e instanceof Error && /budget/i.test(e.message)) throw e;
+          logger.warn(e, "Pre-run budget gate check failed for agent %s; allowing run", agent.id);
         }
       }
 
@@ -3010,6 +3108,31 @@ export function heartbeatService(db: Db) {
           }
         }
       }
+      // Check cost against per-run cost limit and emit a warning event if exceeded
+      if (finalizedRun && adapterResult.costUsd != null && adapterResult.costUsd > 0) {
+        const maxCostPerRunUsd = asNumber(config.maxCostPerRunUsd, 2.0);
+        if (maxCostPerRunUsd > 0 && adapterResult.costUsd > maxCostPerRunUsd) {
+          await appendRunEvent(finalizedRun, seq++, {
+            eventType: "lifecycle",
+            stream: "system",
+            level: "warn",
+            message: `Run cost $${adapterResult.costUsd.toFixed(4)} exceeded per-run limit of $${maxCostPerRunUsd.toFixed(2)}`,
+            payload: {
+              costUsd: adapterResult.costUsd,
+              maxCostPerRunUsd,
+              costLimitExceeded: true,
+            },
+          });
+          logger.warn(
+            "Run %s for agent %s exceeded cost limit: $%s > $%s",
+            run.id,
+            agent.id,
+            adapterResult.costUsd.toFixed(4),
+            maxCostPerRunUsd.toFixed(2),
+          );
+        }
+      }
+
       await finalizeAgentStatus(agent.id, outcome);
 
       // Save agent's response as a chat message for threaded conversations

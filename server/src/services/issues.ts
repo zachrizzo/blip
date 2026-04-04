@@ -11,6 +11,7 @@ import {
   heartbeatRuns,
   executionWorkspaces,
   issueAttachments,
+  issueDependencies,
   issueInboxArchives,
   issueLabels,
   issueComments,
@@ -2007,6 +2008,91 @@ export function issueService(db: Db) {
         project: a.projectId ? projectMap.get(a.projectId) ?? null : null,
         goal: a.goalId ? goalMap.get(a.goalId) ?? null : null,
       }));
+    },
+
+    // ── Issue dependency management ──────────────────────────────────
+
+    addDependency: async (
+      companyId: string,
+      blockingIssueId: string,
+      blockedIssueId: string,
+      type: string = "blocks",
+    ) => {
+      if (blockingIssueId === blockedIssueId) {
+        throw unprocessable("An issue cannot depend on itself");
+      }
+
+      // Cycle detection: walk from blockingIssueId following its own blockers
+      // to ensure blockedIssueId is not an ancestor (which would form a cycle).
+      const visited = new Set<string>();
+      let frontier = [blockingIssueId];
+      for (let hop = 0; hop < 20 && frontier.length > 0; hop++) {
+        const ancestors = await db
+          .select({ blockingIssueId: issueDependencies.blockingIssueId })
+          .from(issueDependencies)
+          .where(inArray(issueDependencies.blockedIssueId, frontier));
+        const next: string[] = [];
+        for (const row of ancestors) {
+          if (row.blockingIssueId === blockedIssueId) {
+            throw unprocessable("Adding this dependency would create a cycle");
+          }
+          if (!visited.has(row.blockingIssueId)) {
+            visited.add(row.blockingIssueId);
+            next.push(row.blockingIssueId);
+          }
+        }
+        frontier = next;
+      }
+
+      const [inserted] = await db
+        .insert(issueDependencies)
+        .values({ companyId, blockingIssueId, blockedIssueId, dependencyType: type })
+        .returning();
+      return inserted;
+    },
+
+    removeDependency: async (depId: string) => {
+      const [deleted] = await db
+        .delete(issueDependencies)
+        .where(eq(issueDependencies.id, depId))
+        .returning();
+      return deleted ?? null;
+    },
+
+    getDependencies: async (issueId: string) => {
+      // Issues that this issue blocks (this issue is the blocker)
+      const blockingAlias = db
+        .select({
+          depId: issueDependencies.id,
+          dependencyType: issueDependencies.dependencyType,
+          createdAt: issueDependencies.createdAt,
+          issueId: issues.id,
+          issueTitle: issues.title,
+          issueStatus: issues.status,
+          issueIdentifier: issues.identifier,
+        })
+        .from(issueDependencies)
+        .innerJoin(issues, eq(issueDependencies.blockedIssueId, issues.id))
+        .where(eq(issueDependencies.blockingIssueId, issueId));
+
+      // Issues that block this issue (this issue is blocked)
+      const blockedByAlias = db
+        .select({
+          depId: issueDependencies.id,
+          dependencyType: issueDependencies.dependencyType,
+          createdAt: issueDependencies.createdAt,
+          issueId: issues.id,
+          issueTitle: issues.title,
+          issueStatus: issues.status,
+          issueIdentifier: issues.identifier,
+        })
+        .from(issueDependencies)
+        .innerJoin(issues, eq(issueDependencies.blockingIssueId, issues.id))
+        .where(eq(issueDependencies.blockedIssueId, issueId));
+
+      const [blocking, blockedBy] = await Promise.all([blockingAlias, blockedByAlias]);
+
+      return { blocking, blockedBy };
     },
   };
 }

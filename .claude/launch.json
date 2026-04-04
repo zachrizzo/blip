@@ -3,20 +3,20 @@
   "configurations": [
     {
       "name": "UI (Vite)",
-      "runtimeExecutable": "pnpm",
-      "runtimeArgs": ["--filter", "@paperclipai/ui", "dev"],
+      "runtimeExecutable": "/bin/sh",
+      "runtimeArgs": ["-c", "PATH=/usr/local/bin:$PATH pnpm --filter @paperclipai/ui dev"],
       "port": 5173
     },
     {
       "name": "Server",
-      "runtimeExecutable": "pnpm",
-      "runtimeArgs": ["--filter", "@paperclipai/server", "dev"],
+      "runtimeExecutable": "/bin/sh",
+      "runtimeArgs": ["-c", "PATH=/usr/local/bin:$PATH pnpm --filter @paperclipai/server dev"],
       "port": 3100
     },
     {
       "name": "Full Dev (UI + Server)",
-      "runtimeExecutable": "pnpm",
-      "runtimeArgs": ["dev:ui"],
+      "runtimeExecutable": "/bin/sh",
+      "runtimeArgs": ["-c", "PATH=/usr/local/bin:$PATH pnpm dev:ui"],
       "port": 5173
     }
   ]

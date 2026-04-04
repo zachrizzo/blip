@@ -221,6 +221,61 @@ export function agentMessageService(db: Db) {
       .limit(limit);
   }
 
+  /**
+   * Send a message from one agent to another.
+   * Resolves or creates a thread scoped to the recipient agent (optionally issue-scoped).
+   */
+  async function sendMessageToAgent(data: {
+    senderAgentId: string;
+    recipientAgentId: string;
+    companyId: string;
+    body: string;
+    issueId?: string;
+    messageDepth?: number;
+  }): Promise<AgentMessage> {
+    let resolvedThreadId: string | null = null;
+
+    if (data.issueId) {
+      const thread = await getOrCreateThreadForIssue(
+        data.companyId,
+        data.recipientAgentId,
+        data.issueId,
+      );
+      resolvedThreadId = thread.id;
+    } else {
+      const now = new Date();
+      const label = now.toLocaleString("en-US", {
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+        hour12: true,
+        timeZone: "UTC",
+      });
+      const thread = await createThread({
+        companyId: data.companyId,
+        agentId: data.recipientAgentId,
+        title: `Agent msg · ${label}`,
+      });
+      resolvedThreadId = thread.id;
+    }
+
+    const bodyWithDepth =
+      data.messageDepth != null
+        ? `[depth:${data.messageDepth}] ${data.body}`
+        : data.body;
+
+    return sendMessage({
+      companyId: data.companyId,
+      agentId: data.recipientAgentId,
+      threadId: resolvedThreadId,
+      issueId: data.issueId,
+      senderType: "agent",
+      senderId: data.senderAgentId,
+      body: bodyWithDepth,
+    });
+  }
+
   return {
     listThreads,
     getThread,
@@ -233,6 +288,7 @@ export function agentMessageService(db: Db) {
     getMessagesForRun,
     getMessagesForThread,
     sendMessage,
+    sendMessageToAgent,
     markDelivered,
     markFailed,
     listForAgent,

@@ -446,3 +446,31 @@ export function createPluginToolDispatcher(
     },
   };
 }
+
+// ---------------------------------------------------------------------------
+// Singleton accessor — allows services that cannot receive the dispatcher
+// via constructor injection (e.g. heartbeatService) to access it.
+// ---------------------------------------------------------------------------
+
+let _singleton: PluginToolDispatcher | null = null;
+
+/**
+ * Store the application-wide `PluginToolDispatcher` so that it can be
+ * retrieved later by services that are not wired through DI.
+ *
+ * Must be called once at server startup, after `createPluginToolDispatcher`.
+ */
+export function setPluginToolDispatcher(dispatcher: PluginToolDispatcher): void {
+  if (_singleton) {
+    logger.warn("setPluginToolDispatcher called more than once, replacing existing dispatcher");
+  }
+  _singleton = dispatcher;
+}
+
+/**
+ * Retrieve the application-wide `PluginToolDispatcher`, or `null` if
+ * it has not been set yet (e.g. during early startup).
+ */
+export function getPluginToolDispatcher(): PluginToolDispatcher | null {
+  return _singleton;
+}

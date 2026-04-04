@@ -13,6 +13,7 @@ import {
   heartbeatRuns,
 } from "@paperclipai/db";
 import { isUuidLike, normalizeAgentUrlKey } from "@paperclipai/shared";
+import { issues } from "@paperclipai/db";
 import { conflict, notFound, unprocessable } from "../errors.js";
 import { normalizeAgentPermissions } from "./agent-permissions.js";
 import { REDACTED_EVENT_VALUE, sanitizeRecord } from "../redaction.js";
@@ -657,6 +658,25 @@ export function agentService(db: Db) {
         .select()
         .from(heartbeatRuns)
         .where(and(eq(heartbeatRuns.agentId, agentId), inArray(heartbeatRuns.status, ["queued", "running"]))),
+
+    getAgentWorkload: async (agentId: string) => {
+      const [issueRows] = await Promise.all([
+        db
+          .select({ count: sql<number>`count(*)::int` })
+          .from(issues)
+          .where(and(eq(issues.status, "in_progress"), eq(issues.assigneeAgentId, agentId))),
+      ]);
+      const [runRows] = await Promise.all([
+        db
+          .select({ count: sql<number>`count(*)::int` })
+          .from(heartbeatRuns)
+          .where(and(eq(heartbeatRuns.status, "running"), eq(heartbeatRuns.agentId, agentId))),
+      ]);
+      return {
+        activeIssueCount: issueRows[0]?.count ?? 0,
+        runningRunCount: runRows[0]?.count ?? 0,
+      };
+    },
 
     resolveByReference: async (companyId: string, reference: string) => {
       const raw = reference.trim();

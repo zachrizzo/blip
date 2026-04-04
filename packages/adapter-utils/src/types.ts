@@ -352,6 +352,7 @@ export interface CreateConfigValues {
   worktreeParentDir?: string;
   runtimeServicesJson?: string;
   maxTurnsPerRun: number;
+  maxCostPerRunUsd: number;
   heartbeatEnabled: boolean;
   intervalSec: number;
 }

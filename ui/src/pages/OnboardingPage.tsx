@@ -662,6 +662,7 @@ export function OnboardingNewRedirect() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [error, setError] = useState<string | null>(null);
+  const startedRef = useRef(false);
 
   const createMutation = useMutation({
     mutationFn: () => companiesApi.create({ name: "New Workspace" }),
@@ -675,6 +676,8 @@ export function OnboardingNewRedirect() {
   });
 
   useEffect(() => {
+    if (startedRef.current) return;
+    startedRef.current = true;
     createMutation.mutate();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 

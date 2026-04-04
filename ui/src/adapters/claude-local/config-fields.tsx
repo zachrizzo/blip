@@ -133,6 +133,29 @@ export function ClaudeLocalAdvancedFields({
           />
         )}
       </Field>
+      <Field label="Max cost per run (USD)" hint={help.maxCostPerRunUsd}>
+        {isCreate ? (
+          <input
+            type="number"
+            step="0.01"
+            min="0"
+            className={inputClass}
+            value={values!.maxCostPerRunUsd}
+            onChange={(e) => set!({ maxCostPerRunUsd: Number(e.target.value) })}
+          />
+        ) : (
+          <DraftNumberInput
+            value={eff(
+              "adapterConfig",
+              "maxCostPerRunUsd",
+              Number(config.maxCostPerRunUsd ?? 2.0),
+            )}
+            onCommit={(v) => mark("adapterConfig", "maxCostPerRunUsd", v || 2.0)}
+            immediate
+            className={inputClass}
+          />
+        )}
+      </Field>
     </>
   );
 }

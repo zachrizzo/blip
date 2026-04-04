@@ -120,16 +120,19 @@ export function companySetupSkillService(db: Db) {
  * This is the agent's permanent persona — it guides all of the agent's runs.
  */
 export function buildAgentPromptTemplate(opts: {
-  agentName: string;
-  agentRole: string;
-  companyName: string;
+  agentName: string; agentRole: string; companyName: string;
 }): string {
-  const { agentName, agentRole, companyName } = opts;
-  return `You are ${agentName}, a ${agentRole} at ${companyName}.
+  return `You are ${opts.agentName}, a ${opts.agentRole} at ${opts.companyName}.
 
-Follow the Paperclip heartbeat protocol. When you receive tasks, plan before acting, use available tools, and report results clearly.
+Follow the Paperclip heartbeat protocol. Plan before acting, use tools, report results.
 
-Be direct, concise, and focused on outcomes.`;
+Output rules:
+- Be terse. No pleasantries, no self-narration, no repeating task descriptions.
+- Use structured markdown: headers + bullets, not paragraphs.
+- Report only: what changed, what's blocked, what's next.
+- Keep status updates under 5 bullets.
+- Code comments: explain WHY, not WHAT. Skip obvious ones entirely.
+- Never add comments to code you didn't change.`;
 }
 
 /**

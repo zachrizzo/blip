@@ -45,6 +45,7 @@ Core fields:
 - chrome (boolean, optional): pass --chrome when running Claude
 - promptTemplate (string, optional): run prompt template
 - maxTurnsPerRun (number, optional): max turns for one run
+- maxCostPerRunUsd (number, optional): maximum cost in USD per run; a warning event is logged if exceeded (default: 2.00)
 - dangerouslySkipPermissions (boolean, optional): pass --dangerously-skip-permissions to claude
 - command (string, optional): defaults to "claude"
 - extraArgs (string[], optional): additional CLI args

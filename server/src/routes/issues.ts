@@ -1776,5 +1776,114 @@ export function issueRoutes(db: Db, storage: StorageService) {
     res.json({ ok: true });
   });
 
+  // ── Issue dependencies ──────────────────────────────────────────
+
+  const addDependencySchema = z.object({
+    blockingIssueId: z.string().uuid(),
+    type: z.string().optional(),
+  });
+
+  router.post("/companies/:companyId/issues/:issueId/dependencies", validate(addDependencySchema), async (req, res) => {
+    const companyId = req.params.companyId as string;
+    const issueId = req.params.issueId as string;
+    assertCompanyAccess(req, companyId);
+    try {
+      const dep = await svc.addDependency(
+        companyId,
+        req.body.blockingIssueId,
+        issueId,
+        req.body.type ?? "blocks",
+      );
+      res.status(201).json(dep);
+    } catch (err) {
+      if (err instanceof HttpError) throw err;
+      throw err;
+    }
+  });
+
+  router.delete("/companies/:companyId/issues/:issueId/dependencies/:depId", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    const depId = req.params.depId as string;
+    assertCompanyAccess(req, companyId);
+    const removed = await svc.removeDependency(depId);
+    if (!removed) {
+      res.status(404).json({ error: "Dependency not found" });
+      return;
+    }
+    res.json({ ok: true });
+  });
+
+  router.get("/companies/:companyId/issues/:issueId/dependencies", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    const issueId = req.params.issueId as string;
+    assertCompanyAccess(req, companyId);
+    const deps = await svc.getDependencies(issueId);
+    res.json(deps);
+  });
+
+  router.get("/companies/:companyId/issues/:issueId/suggest-assignee", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    const issueId = req.params.issueId as string;
+    assertCompanyAccess(req, companyId);
+
+    const issue = await svc.getById(issueId);
+    if (!issue) {
+      res.status(404).json({ error: "Issue not found" });
+      return;
+    }
+
+    const allAgents = await agentsSvc.list(companyId);
+    const issueText = `${issue.title ?? ""} ${issue.description ?? ""}`.toLowerCase();
+
+    const scored: { agentId: string; agentName: string; score: number; activeIssueCount: number }[] = [];
+
+    for (const agent of allAgents) {
+      let score = 0;
+
+      if (agent.status !== "active" && agent.status !== "idle") {
+        score = -1000;
+      }
+
+      // Parse capabilities (stored as JSON string array) and match keywords
+      let capabilities: string[] = [];
+      if (agent.capabilities) {
+        try {
+          const parsed = typeof agent.capabilities === "string"
+            ? JSON.parse(agent.capabilities)
+            : agent.capabilities;
+          if (Array.isArray(parsed)) {
+            capabilities = parsed.map((c: unknown) => String(c));
+          }
+        } catch {
+          // capabilities not parseable, skip
+        }
+      }
+
+      for (const cap of capabilities) {
+        if (cap && issueText.includes(cap.toLowerCase())) {
+          score += 10;
+        }
+      }
+
+      const workload = await agentsSvc.getAgentWorkload(agent.id);
+      score -= workload.activeIssueCount * 5;
+
+      scored.push({
+        agentId: agent.id,
+        agentName: agent.name,
+        score,
+        activeIssueCount: workload.activeIssueCount,
+      });
+    }
+
+    // Filter out inactive agents and sort by score descending
+    const suggestions = scored
+      .filter((s) => s.score > -1000)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 3);
+
+    res.json(suggestions);
+  });
+
   return router;
 }

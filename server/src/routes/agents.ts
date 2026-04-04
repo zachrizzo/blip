@@ -2550,6 +2550,139 @@ export function agentRoutes(db: Db) {
     res.json(await messages.listForAgent(agentId, limit));
   });
 
+  // ─── Agent-to-Agent Messaging ────────────────────────────────────────
+
+  // Simple in-memory rate limiting: sender agentId -> timestamps of recent messages
+  const agentMsgRateMap = new Map<string, number[]>();
+  const AGENT_MSG_RATE_LIMIT = 10; // max messages per window
+  const AGENT_MSG_RATE_WINDOW_MS = 60_000; // 1 minute
+  const AGENT_MSG_MAX_DEPTH = 5;
+
+  /** Send a message from one agent to another */
+  router.post("/agents/:recipientAgentId/messages/from-agent", async (req, res) => {
+    // 1. Authenticate sender agent
+    if (!req.actor.agentId) {
+      res.status(403).json({ error: "Agent authentication required" });
+      return;
+    }
+    const senderAgentId = req.actor.agentId;
+    const recipientAgentId = req.params.recipientAgentId as string;
+
+    if (senderAgentId === recipientAgentId) {
+      res.status(400).json({ error: "An agent cannot send messages to itself" });
+      return;
+    }
+
+    // 2. Validate both agents exist and are in the same company
+    const [senderAgent, recipientAgent] = await Promise.all([
+      svc.getById(senderAgentId),
+      svc.getById(recipientAgentId),
+    ]);
+
+    if (!senderAgent) { res.status(404).json({ error: "Sender agent not found" }); return; }
+    if (!recipientAgent) { res.status(404).json({ error: "Recipient agent not found" }); return; }
+    if (senderAgent.companyId !== recipientAgent.companyId) {
+      res.status(403).json({ error: "Agents must be in the same company" });
+      return;
+    }
+
+    // 3. Validate sender is active (not terminated/pending)
+    if (senderAgent.status === "terminated" || senderAgent.status === "pending") {
+      res.status(403).json({ error: `Sender agent is ${senderAgent.status} and cannot send messages` });
+      return;
+    }
+
+    const { body: messageBody, issueId, messageDepth } = req.body as {
+      body: string;
+      issueId?: string;
+      messageDepth?: number;
+    };
+    if (!messageBody?.trim()) {
+      res.status(400).json({ error: "body is required" });
+      return;
+    }
+
+    // 4. Depth tracking — reject if conversation is too deep
+    const depth = typeof messageDepth === "number" ? messageDepth : 0;
+    if (depth > AGENT_MSG_MAX_DEPTH) {
+      res.status(429).json({
+        error: `Message depth ${depth} exceeds maximum of ${AGENT_MSG_MAX_DEPTH}`,
+        code: "DEPTH_LIMIT_EXCEEDED",
+      });
+      return;
+    }
+
+    // 5. Rate limiting — sliding window per sender
+    const now = Date.now();
+    const timestamps = agentMsgRateMap.get(senderAgentId) ?? [];
+    const recentTimestamps = timestamps.filter((t) => now - t < AGENT_MSG_RATE_WINDOW_MS);
+    if (recentTimestamps.length >= AGENT_MSG_RATE_LIMIT) {
+      res.status(429).json({
+        error: `Rate limit exceeded: max ${AGENT_MSG_RATE_LIMIT} agent messages per minute`,
+        code: "RATE_LIMIT_EXCEEDED",
+      });
+      return;
+    }
+    recentTimestamps.push(now);
+    agentMsgRateMap.set(senderAgentId, recentTimestamps);
+
+    // 6. Send the message
+    const msg = await messages.sendMessageToAgent({
+      senderAgentId,
+      recipientAgentId,
+      companyId: senderAgent.companyId,
+      body: messageBody.trim(),
+      issueId,
+      messageDepth: depth,
+    });
+
+    publishLiveEvent({
+      companyId: senderAgent.companyId,
+      type: "agent.message.sent",
+      payload: {
+        messageId: msg.id,
+        agentId: recipientAgentId,
+        senderAgentId,
+        body: messageBody.trim(),
+      },
+    });
+
+    // 7. Auto-wake the recipient agent
+    let wakeupTriggered = false;
+    try {
+      const isPausedOrIdle =
+        recipientAgent.status === "paused" || recipientAgent.status === "idle";
+      if (isPausedOrIdle) {
+        if (recipientAgent.status === "paused") {
+          await svc.resume(recipientAgentId);
+        }
+
+        const recentRuns = await heartbeat.list(recipientAgent.companyId, recipientAgentId, 1);
+        const lastRun = recentRuns[0];
+
+        await heartbeat.wakeup(recipientAgentId, {
+          source: "on_demand",
+          triggerDetail: "manual",
+          reason: `Agent ${senderAgentId} message: ${messageBody.trim().slice(0, 100)}`,
+          threadId: msg.threadId ?? undefined,
+          payload: {
+            userMessage: messageBody.trim(),
+            senderAgentId,
+            messageDepth: depth,
+            ...(lastRun ? { resumeFromRunId: lastRun.id } : {}),
+          },
+          requestedByActorType: "agent" as const,
+          requestedByActorId: senderAgentId,
+        });
+        wakeupTriggered = true;
+      }
+    } catch (e) {
+      await messages.markFailed(msg.id).catch(() => {});
+    }
+
+    res.json({ message: msg, wakeupTriggered });
+  });
+
   // ─── Agent Chat Threads ─────────────────────────────────────────────
 
   /** List threads for an agent */
@@ -2759,6 +2892,87 @@ export function agentRoutes(db: Db) {
     const id = req.params.id as string;
     await blocklist.remove(id);
     res.status(204).end();
+  });
+
+  // -------------------------------------------------------------------------
+  // Plugin tool execution — allows agents to invoke plugin-provided tools
+  // -------------------------------------------------------------------------
+
+  /**
+   * POST /agents/:agentId/execute-tool
+   *
+   * Execute a plugin tool on behalf of an agent. Authenticated via agent API key.
+   *
+   * Body: { toolName: string, parameters: Record<string, unknown> }
+   */
+  router.post("/:companyId/agents/:agentId/execute-tool", async (req, res) => {
+    // 1. Authenticate — must be an agent actor
+    if (req.actor.type !== "agent" || !req.actor.agentId) {
+      res.status(401).json({ error: "Agent authentication required" });
+      return;
+    }
+
+    const { agentId, companyId } = req.params;
+
+    // 2. Verify the authenticated agent matches the route params
+    if (req.actor.agentId !== agentId) {
+      res.status(403).json({ error: "Agent key does not match the requested agent" });
+      return;
+    }
+
+    // 3. Validate agent exists and is active
+    const agent = await svc.getById(agentId);
+    if (!agent || agent.companyId !== companyId) {
+      res.status(404).json({ error: "Agent not found" });
+      return;
+    }
+    if (agent.status !== "active") {
+      res.status(403).json({ error: `Agent is not active (status: ${agent.status})` });
+      return;
+    }
+
+    // 4. Validate request body
+    const { toolName, parameters } = req.body as {
+      toolName?: string;
+      parameters?: Record<string, unknown>;
+    };
+    if (!toolName || typeof toolName !== "string") {
+      res.status(400).json({ error: "toolName is required and must be a string" });
+      return;
+    }
+
+    // 5. Get the plugin tool dispatcher
+    const { getPluginToolDispatcher } = await import("../services/plugin-tool-dispatcher.js");
+    const dispatcher = getPluginToolDispatcher();
+    if (!dispatcher) {
+      res.status(503).json({ error: "Plugin tool system is not available" });
+      return;
+    }
+
+    // 6. Verify the tool exists
+    const tool = dispatcher.getTool(toolName);
+    if (!tool) {
+      res.status(404).json({ error: `Tool "${toolName}" not found` });
+      return;
+    }
+
+    // 7. Execute the tool
+    try {
+      const result = await dispatcher.executeTool(toolName, parameters ?? {}, {
+        agentId: agent.id,
+        runId: req.actor.runId ?? "unknown",
+        companyId: agent.companyId,
+        projectId: "",
+      });
+      res.json({
+        pluginId: result.pluginId,
+        toolName: result.toolName,
+        result: result.result,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      res.status(500).json({ error: `Tool execution failed: ${message}` });
+    }
   });
 
   return router;

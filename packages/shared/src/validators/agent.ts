@@ -50,7 +50,11 @@ export const createAgentSchema = z.object({
   title: z.string().optional().nullable(),
   icon: z.enum(AGENT_ICON_NAMES).optional().nullable(),
   reportsTo: z.string().uuid().optional().nullable(),
-  capabilities: z.string().optional().nullable(),
+  capabilities: z
+    .array(z.string())
+    .optional()
+    .nullable()
+    .transform((val) => (Array.isArray(val) ? JSON.stringify(val) : val ?? null)),
   desiredSkills: z.array(z.string().min(1)).optional(),
   adapterType: z.enum(AGENT_ADAPTER_TYPES).optional().default("process"),
   adapterConfig: adapterConfigSchema.optional().default({}),
